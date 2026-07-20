@@ -723,10 +723,18 @@ class AdashApp(App):
         return f"{marker} {tool_seg}{plan_seg}"
 
     def _usage_text(self) -> str:
+        # the third column is a model-scoped weekly limit (e.g. "fable"), shown
+        # only when some plan actually reports one
+        extra = next(
+            (w.label for u in self.usages for w in u.windows if w.label not in ("5h", "7d")),
+            None,
+        )
+        cols = (
+            _pad_visible("5h", 2, USAGE_CELL_W + len(USAGE_GAP))
+            + (_pad_visible("7d", 2, USAGE_CELL_W + len(USAGE_GAP)) + extra if extra else "7d")
+        )
         header = _pad_visible("", 0, 2) + "[dim]" + (
-            _pad_visible("plan", 4, USAGE_TOOL_W + USAGE_PLAN_W)
-            + _pad_visible("5h", 2, USAGE_CELL_W + len(USAGE_GAP))
-            + "7d"
+            _pad_visible("plan", 4, USAGE_TOOL_W + USAGE_PLAN_W) + cols
         ) + "[/]"
         lines = [header]
         for usage in self.usages:
@@ -744,9 +752,10 @@ class AdashApp(App):
                 lines.append(f"{prefix}{empty}{USAGE_GAP}{spend_cell}")
                 continue
             windows = {w.label: w for w in usage.windows}
-            cell_5h = _window_cell(windows.get("5h"))
-            cell_7d = _window_cell(windows.get("7d"))
-            lines.append(f"{prefix}{cell_5h}{USAGE_GAP}{cell_7d}")
+            row = f"{prefix}{_window_cell(windows.get('5h'))}{USAGE_GAP}{_window_cell(windows.get('7d'))}"
+            if extra and extra in windows:  # this plan has the scoped limit; add its cell
+                row += f"{USAGE_GAP}{_window_cell(windows[extra])}"
+            lines.append(row)
         multi = sum(1 for u in self.usages if u.tool == "claude" and u.label) > 1
         if multi:
             lines.append("[dim]↹ tab switches the active claude plan[/]")

@@ -177,6 +177,25 @@ def test_parse_claude_usage_payload():
     assert windows[0].resets_at is not None
 
 
+def test_parse_claude_usage_includes_fable_scoped_limit():
+    from usage import _parse_claude_usage
+
+    payload = {
+        "five_hour": {"utilization": 39.0, "resets_at": "2026-07-20T22:00:00+00:00"},
+        "seven_day": {"utilization": 26.0, "resets_at": "2026-07-21T00:00:00+00:00"},
+        "limits": [
+            {"kind": "session", "percent": 39, "resets_at": "2026-07-20T22:00:00+00:00", "scope": None},
+            {"kind": "weekly_all", "percent": 26, "resets_at": "2026-07-21T00:00:00+00:00", "scope": None},
+            {"kind": "weekly_scoped", "percent": 32, "resets_at": "2026-07-21T00:00:00+00:00",
+             "scope": {"model": {"id": None, "display_name": "Fable"}, "surface": None}},
+        ],
+    }
+    windows = _parse_claude_usage(payload)
+    assert [w.label for w in windows] == ["5h", "7d", "fable"]  # scoped model becomes its own window
+    assert windows[-1].pct == 32.0
+    assert windows[-1].resets_at is not None
+
+
 def test_codex_usage_from_rollouts(codex_root: Path):
     from usage import fetch_codex_usage
 
@@ -1210,3 +1229,23 @@ def test_render_usage_aligns_columns_and_firstparty_opencode():
     # the "5h" header sits directly above where the 5h bars start
     header, first_row = plain.splitlines()[0], plain.splitlines()[1]
     assert header.index("5h") == first_row.index("█")
+
+
+def test_render_usage_adds_fable_column_only_where_present():
+    from rich.text import Text
+    from usage import ToolUsage, UsageWindow
+
+    app = AdashApp()
+    app.usages = [
+        ToolUsage(tool="claude", plan="Team", label="default", active=True,
+                  windows=[UsageWindow("5h", 39.0), UsageWindow("7d", 26.0), UsageWindow("fable", 32.0)]),
+        ToolUsage(tool="codex", plan="Pro", windows=[UsageWindow("7d", 100.0)]),
+    ]
+    lines = Text.from_markup(app._usage_text()).plain.splitlines()
+    header, claude_row, codex_row = lines[0], lines[1], lines[2]
+    assert "fable" in header  # third column labeled once
+    assert "32%" in claude_row  # fable percent shown on the claude row
+    assert "32%" not in codex_row  # codex has no fable limit -> no third cell
+    # the "fable" header sits directly above the claude row's third bar
+    fcol = header.index("fable")
+    assert claude_row[fcol] in "█░"
