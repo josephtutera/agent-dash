@@ -1,0 +1,32 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "agent-dash"
+version = "0.1.0"
+description = "One terminal dashboard for your Claude Code, Codex, and OpenCode sessions"
+readme = "README.md"
+license = { file = "LICENSE" }
+authors = [{ name = "Joseph Tutera" }]
+requires-python = ">=3.10"
+dependencies = [
+    "textual>=8.0,<9",
+    "pyfiglet>=1.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "cairosvg>=2.7",  # only used to convert the README screenshot SVG to PNG
+]
+
+[project.scripts]
+adash = "main:main"
+
+[project.urls]
+Homepage = "https://github.com/josephtutera/agent-dash"
+Issues = "https://github.com/josephtutera/agent-dash/issues"
+
+[tool.setuptools]
+py-modules = ["main", "app", "activity", "agents", "collectors", "models", "usage"]
