@@ -270,15 +270,27 @@ def test_app_new_session_opens_warp_tab(tmp_path: Path, monkeypatch: pytest.Monk
 def test_banner_art_picks_a_font_that_fits():
     import pyfiglet
 
-    slant = pyfiglet.figlet_format("JosephCode", font="slant").rstrip()
-    small = pyfiglet.figlet_format("JosephCode", font="small").rstrip()
-    slant_w = max(len(line) for line in slant.splitlines())
-    small_w = max(len(line) for line in small.splitlines())
+    arts = [pyfiglet.figlet_format("JosephCode", font=f).rstrip() for f in app_module.BANNER_FONTS]
+    widths = [max(len(line) for line in art.splitlines()) for art in arts]
 
-    assert app_module._banner_art(slant_w) == slant
-    assert app_module._banner_art(slant_w - 1) == small
-    assert app_module._banner_art(small_w) == small
-    assert app_module._banner_art(small_w - 1) == ""  # nothing fits: plain-text fallback
+    assert widths == sorted(widths, reverse=True), "BANNER_FONTS must be widest-first"
+    assert app_module._banner_art(widths[0]) == arts[0]
+    assert app_module._banner_art(widths[0] - 1) == arts[1]
+    assert app_module._banner_art(widths[-1]) == arts[-1]
+    assert app_module._banner_art(widths[-1] - 1) == ""  # nothing fits: plain-text fallback
+
+
+def test_banner_fonts_have_no_ligature_prone_pairs():
+    # coding fonts merge pairs like \/ and __ into single glyphs, which melts
+    # slash-heavy figlet art into fragments; banner fonts must avoid them all
+    import pyfiglet
+
+    risky = ('\\/', '/\\', '__', '--', '==', '!=', '>=', '<=', '->', '<-',
+             '&&', '||', '<<', '>>', '::', '..')
+    for font in app_module.BANNER_FONTS:
+        art = pyfiglet.figlet_format(app_module.BANNER_TEXT, font=font)
+        for pair in risky:
+            assert pair not in art, f"font {font!r} contains ligature-prone {pair!r}"
 
 
 def test_banner_never_exceeds_its_width(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
@@ -507,6 +519,126 @@ def test_navigation_through_active_rows(tmp_path: Path, monkeypatch: pytest.Monk
             await pilot.press("up")  # active[0] -> picker[last]
             await pilot.pause(0.1)
             assert app.zone == "picker"
+
+    asyncio.run(run())
+
+
+def test_focus_warp_tab_cycles_until_title_matches(monkeypatch: pytest.MonkeyPatch):
+    titles = ["~ agent-dash", "✳ Some other tab", "✳ Design bug fix and GitHub push"]
+    state = {"i": 0}
+    calls = []
+
+    def fake_osa(script: str) -> tuple[bool, str]:
+        calls.append(script)
+        if "keystroke" in script:
+            state["i"] += 1  # each next-tab keystroke advances the active tab
+            return True, ""
+        if "activate" in script:
+            return True, ""
+        return True, titles[state["i"]]
+
+    monkeypatch.setattr(app_module, "_osa", fake_osa)
+    assert app_module._focus_warp_tab(["design bug fix"]) == "focused"
+    assert sum("keystroke" in c for c in calls) == 2  # skipped two unrelated tabs
+    assert any("activate" in c for c in calls)  # Warp always comes to the front
+
+
+def test_focus_warp_tab_denied_without_accessibility(monkeypatch: pytest.MonkeyPatch):
+    calls = []
+
+    def fake_osa(script: str) -> tuple[bool, str]:
+        calls.append(script)
+        return False, "osascript is not allowed assistive access. (-1719)"
+
+    monkeypatch.setattr(app_module, "_osa", fake_osa)
+    assert app_module._focus_warp_tab(["anything"]) == "denied"
+    assert not any("keystroke" in c for c in calls)  # no point cycling blind
+
+
+def _focus_recorder(monkeypatch: pytest.MonkeyPatch, calls: list) -> None:
+    def fake_focus(hints: list[str], max_tabs: int = 16) -> str:
+        calls.append(hints)
+        return "focused"
+
+    monkeypatch.setattr(app_module, "_focus_warp_tab", fake_focus)
+
+
+async def _wait_for_focus_call(pilot, calls: list) -> None:
+    for _ in range(100):
+        await pilot.pause(0.05)
+        if calls:
+            break
+
+
+def test_enter_on_active_row_jumps_to_tab(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    from agents import RunningAgent
+
+    monkeypatch.setattr(app_module, "collect_all", lambda limit=300: _fake_sessions())
+    _stub_usage(monkeypatch)
+    _stub_running(monkeypatch, agents=[
+        # cwd matches no fake session, so the display title is the dir basename
+        RunningAgent(tool="claude", pid=1, tty="ttys001", elapsed="5m",
+                     cwd="/Users/test/web-app"),
+    ])
+    calls: list = []
+    _focus_recorder(monkeypatch, calls)
+
+    async def run() -> None:
+        app = AdashApp(cmd_file=str(tmp_path / "cmd"))
+        async with app.run_test(size=(110, 32)) as pilot:
+            await _wait_for_table(pilot, app)
+            for _ in range(100):
+                await pilot.pause(0.05)
+                if app.running:
+                    break
+            for _ in range(10):  # walk the chain down into the active zone
+                await pilot.press("down")
+                await pilot.pause(0.05)
+                if app.zone == "active":
+                    break
+            assert app.zone == "active"
+            await pilot.press("enter")
+            await _wait_for_focus_call(pilot, calls)
+
+    asyncio.run(run())
+    assert calls and "web-app" in calls[0]
+
+
+def test_click_active_row_jumps_to_tab(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    from agents import RunningAgent
+
+    monkeypatch.setattr(app_module, "collect_all", lambda limit=300: _fake_sessions())
+    _stub_usage(monkeypatch)
+    _stub_running(monkeypatch, agents=[
+        RunningAgent(tool="claude", pid=1, tty="ttys001", elapsed="5m",
+                     cwd="/Users/test/web-app", state="working",
+                     label="editing auth.py", tokens=12_000),
+        RunningAgent(tool="codex", pid=2, tty="ttys002", elapsed="9m",
+                     cwd="/Users/test/api-server"),
+    ])
+    calls: list = []
+    _focus_recorder(monkeypatch, calls)
+
+    async def run() -> None:
+        app = AdashApp(cmd_file=str(tmp_path / "cmd"))
+        async with app.run_test(size=(110, 32)) as pilot:
+            await _wait_for_table(pilot, app)
+            for _ in range(100):
+                await pilot.pause(0.05)
+                if app.running:
+                    break
+            # panel rows: border 1 + padding-top 1, so content line 0 is y=2;
+            # the first agent also has a detail line at y=3
+            await pilot.click("#active", offset=(5, 2))
+            await _wait_for_focus_call(pilot, calls)
+            assert calls and "web-app" in calls[0]
+            assert app.zone == "active" and app.active_idx == 0
+
+            calls.clear()
+            await pilot.click("#active", offset=(5, 4))  # second agent's row
+            await _wait_for_focus_call(pilot, calls)
+            assert calls and "api-server" in calls[0]
+            assert app.active_idx == 1
 
     asyncio.run(run())
 

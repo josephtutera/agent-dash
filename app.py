@@ -4,13 +4,15 @@ from __future__ import annotations
 
 import os
 import re
+import subprocess
+import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from subprocess import DEVNULL, Popen
 
 from rich.markup import escape
 from rich.text import Text
-from textual import on, work
+from textual import events, on, work
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.widgets import DataTable, Footer, Input, Static
@@ -24,7 +26,10 @@ from usage import ToolUsage, UsageWindow, claude_profiles, collect_usage
 BAR_WIDTH = 24
 MAX_ACTIVE_ROWS = 6
 BANNER_TEXT = "JosephCode"
-BANNER_FONTS = ("slant", "small")  # widest first; each is measured before use
+# ligature-safe fonts only: coding fonts merge pairs like \/ and __ into
+# single glyphs, which melts slash-heavy art (slant, small, standard) into
+# fragments. thick and mini contain no ligature-prone pairs.
+BANNER_FONTS = ("thick", "mini")  # widest first; each is measured before use
 # columns never available to the banner: its own padding (2 per side) plus the
 # screen's vertical scrollbar, assumed always present so the art still fits if
 # the scrollbar pops in after data loads
@@ -110,6 +115,43 @@ def _warp_configs_dir() -> Path:
     return Path.home() / ".warp" / "tab_configs"
 
 
+ACCESSIBILITY_URL = "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility"
+_READ_TAB_TITLE = 'tell application "System Events" to tell process "Warp" to get title of front window'
+_NEXT_TAB = ('tell application "System Events" to tell process "Warp" to '
+             'keystroke "]" using {command down, shift down}')
+
+
+def _osa(script: str) -> tuple[bool, str]:
+    try:
+        proc = subprocess.run(["osascript", "-e", script], capture_output=True, text=True, timeout=5)
+    except Exception as exc:  # osascript missing/timed out: treat as unavailable
+        return False, str(exc)
+    return proc.returncode == 0, (proc.stdout or proc.stderr).strip()
+
+
+def _focus_warp_tab(hints: list[str], max_tabs: int = 16) -> str:
+    """Bring Warp to front and select the tab whose title matches a hint.
+
+    `hints` are matched case-insensitively as substrings of the window title
+    (Warp's window title tracks the active tab). Warp's URI scheme can only
+    open NEW tabs, so finding an existing one means cycling with the next-tab
+    keystroke, which needs Accessibility permission. Returns "focused",
+    "activated" (Warp is front-most but no tab matched), or "denied".
+    """
+    ok, _ = _osa(_READ_TAB_TITLE)
+    if not ok:
+        return "denied"
+    _osa('tell application "Warp" to activate')
+    lowered = [h.lower() for h in hints if h]
+    for _ in range(max_tabs):
+        ok, title = _osa(_READ_TAB_TITLE)
+        if ok and any(h in title.lower() for h in lowered):
+            return "focused"
+        _osa(_NEXT_TAB)
+        time.sleep(0.12)  # let Warp switch before re-reading the title
+    return "activated"
+
+
 def _dir_slug(cwd: str) -> str:
     """A filename-safe slug from a directory basename, for per-dir tab configs."""
     name = Path(cwd).name or "root"
@@ -186,6 +228,27 @@ class _SessionsTable(DataTable):
     """
 
     can_focus = False
+
+
+class _ActivePanel(Static):
+    """Active-now panel where clicking a row jumps to that agent's Warp tab.
+
+    The click is handled here rather than in AdashApp.on_click: under Textual 8
+    mouse events are delivered to the widget under the cursor and don't reach
+    app-level handlers the way keys do. event.y is relative to the panel's
+    border, so content rows start at y=2 (border + top padding).
+    """
+
+    def on_click(self, event: events.Click) -> None:
+        app = self.app
+        if not isinstance(app, AdashApp) or not app.running:
+            return
+        idx = app._agent_at_line(event.y - 2)
+        if idx is None:
+            return
+        app.active_idx = idx
+        app._set_zone("active")
+        app._focus_agent(app.running[idx])
 
 
 class AdashApp(App):
@@ -284,7 +347,7 @@ class AdashApp(App):
     def compose(self) -> ComposeResult:
         yield Static(id="banner")
         yield Static("loading usage…", id="usage", classes="panel")
-        yield Static("scanning processes…", id="active", classes="panel")
+        yield _ActivePanel("scanning processes…", id="active", classes="panel")
         yield Static(id="launch")
         yield Static(id="picker")
         yield Static(id="spacer")
@@ -326,7 +389,9 @@ class AdashApp(App):
     def _render_banner(self) -> None:
         banner = self.query_one("#banner", Static)
         art = _banner_art(self.size.width - BANNER_CHROME)
-        banner.update(f"[bold]{escape(art)}[/]" if art else f"[bold]◆ {BANNER_TEXT}[/]")
+        # no bold on the art: terminals without a true bold font synthesize it
+        # by overstriking, which smears dense figlet glyphs
+        banner.update(escape(art) if art else f"[bold]◆ {BANNER_TEXT}[/]")
 
     def _render_launch(self) -> None:
         chips = []
@@ -506,6 +571,7 @@ class AdashApp(App):
                 lines.append(f"             {detail}")
         if len(self.running) > MAX_ACTIVE_ROWS:
             lines.append(f"[dim]…and {len(self.running) - MAX_ACTIVE_ROWS} more[/]")
+        lines.append("[dim]enter or click jumps to the tab[/]")
         panel.update("\n".join(lines))
 
     def _title_for(self, agent: RunningAgent) -> str:
@@ -521,8 +587,47 @@ class AdashApp(App):
     def _enter_active(self) -> None:
         if not self.running:
             return
-        agent = self.running[self.active_idx]
-        self.notify(f"{agent.tool} is already running in another tab ({agent.tty})", timeout=3)
+        self._focus_agent(self.running[self.active_idx])
+
+    @work(thread=True, exclusive=True, group="focus")
+    def _focus_agent(self, agent: RunningAgent) -> None:
+        """Jump to the Warp tab running this agent (applescript is slow: thread)."""
+        title = self._title_for(agent)
+        hints = [title[:24], Path(agent.cwd).name]
+        result = _focus_warp_tab(hints)
+        self.call_from_thread(self._notify_focus_result, agent, result)
+
+    def _notify_focus_result(self, agent: RunningAgent, result: str) -> None:
+        if result == "focused":
+            self.notify(f"jumped to the {agent.tool} tab", timeout=2)
+        elif result == "denied":
+            self.notify(
+                "needs accessibility access to find the tab: allow Warp in "
+                "System Settings → Privacy & Security → Accessibility",
+                timeout=8,
+            )
+            Popen(["open", ACCESSIBILITY_URL], stdout=DEVNULL, stderr=DEVNULL)
+        else:
+            self.notify(f"Warp is up front; look for the tab on {agent.tty}", timeout=3)
+
+    def _agent_at_line(self, line: int) -> int | None:
+        """Map a content row in the #active panel to a running-agent index.
+
+        Each agent takes one row, plus a second when it has a detail line
+        (current action / live tokens); clicking either selects that agent.
+        """
+        if line < 0:
+            return None
+        cursor = 0
+        for i, agent in enumerate(self.running[:MAX_ACTIVE_ROWS]):
+            cursor += 1
+            if line < cursor:
+                return i
+            if _activity_detail(agent):
+                cursor += 1
+                if line < cursor:
+                    return i
+        return None
 
     # ------------------------------------------------------------- usage
 

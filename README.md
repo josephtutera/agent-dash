@@ -13,14 +13,17 @@ history, all in one place.
   spend, with color-coded bars as you warm up.
 - **Active now.** A live view of every agent actually running on your machine:
   working / waiting / idle state, the file or command it's on, and live token
-  counts.
+  counts. Hit enter or click a row to jump straight to that agent's Warp tab.
 - **Launch new sessions.** Start claude, codex, opencode, or a plain shell in
   Warp tabs, in one directory or several at once, straight from the dashboard.
 - **Searchable history.** Every session from all three tools in one table.
   Filter by tool, search titles and projects, hit enter, and get the exact
   command to resume that session where you left off.
 - **Wrap-proof banner.** The figlet logo measures itself against the terminal
-  and steps down to a smaller font or plain text, so it never shreds.
+  and steps down to a smaller font or plain text, so it never shreds. It also
+  sticks to ligature-safe fonts and regular weight, because coding fonts merge
+  pairs like `\/` and `__` into single glyphs and synthesized bold smears
+  dense ASCII art.
 
 ## Requirements
 
@@ -85,7 +88,10 @@ adash() {
 | `q` | quit |
 
 In the launcher: arrow keys select, `space` toggles directories, `enter` opens
-the tabs.
+the tabs. In the active-now list, `enter` (or a click) jumps to that agent's
+Warp tab. The first time you jump, macOS will ask you to grant Warp
+Accessibility access so the dashboard can switch tabs for you; without it,
+Warp still comes to the front but you'll pick the tab yourself.
 
 ## Where the data comes from
 
