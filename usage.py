@@ -157,6 +157,24 @@ def _parse_claude_usage(payload: dict) -> list[UsageWindow]:
                 resets_at=_parse_ts(data.get("resets_at")),
             )
         )
+    # The model-scoped weekly limit (Fable on Max/Team) isn't a top-level key;
+    # it only shows up in the `limits` array as a "weekly_scoped" entry tagged
+    # with the model's display name. Surface it as its own window.
+    for lim in payload.get("limits", []):
+        if not isinstance(lim, dict) or lim.get("kind") != "weekly_scoped":
+            continue
+        name = ((lim.get("scope") or {}).get("model") or {}).get("display_name")
+        if not name:
+            continue
+        pct = lim.get("percent")
+        windows.append(
+            UsageWindow(
+                label=name.lower(),  # e.g. "fable"
+                pct=float(pct) if pct is not None else None,
+                resets_at=_parse_ts(lim.get("resets_at")),
+            )
+        )
+        break  # one scoped limit is enough
     return windows
 
 
