@@ -280,19 +280,6 @@ def test_banner_art_picks_a_font_that_fits():
     assert app_module._banner_art(widths[-1] - 1) == ""  # nothing fits: plain-text fallback
 
 
-def test_banner_fonts_have_no_ligature_prone_pairs():
-    # coding fonts merge pairs like \/ and __ into single glyphs, which melts
-    # slash-heavy figlet art into fragments; banner fonts must avoid them all
-    import pyfiglet
-
-    risky = ('\\/', '/\\', '__', '--', '==', '!=', '>=', '<=', '->', '<-',
-             '&&', '||', '<<', '>>', '::', '..')
-    for font in app_module.BANNER_FONTS:
-        art = pyfiglet.figlet_format(app_module.BANNER_TEXT, font=font)
-        for pair in risky:
-            assert pair not in art, f"font {font!r} contains ligature-prone {pair!r}"
-
-
 def test_banner_never_exceeds_its_width(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     # a banner wider than the Static gets word-wrapped mid-glyph, shredding the
     # art into diagonal fragments; at every terminal width it must fit instead

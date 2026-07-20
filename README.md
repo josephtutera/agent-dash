@@ -20,10 +20,7 @@ history, all in one place.
   Filter by tool, search titles and projects, hit enter, and get the exact
   command to resume that session where you left off.
 - **Wrap-proof banner.** The figlet logo measures itself against the terminal
-  and steps down to a smaller font or plain text, so it never shreds. It also
-  sticks to ligature-safe fonts and regular weight, because coding fonts merge
-  pairs like `\/` and `__` into single glyphs and synthesized bold smears
-  dense ASCII art.
+  and steps down to a smaller font or plain text, so it never shreds.
 
 ## Requirements
 

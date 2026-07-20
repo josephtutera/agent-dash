@@ -26,10 +26,7 @@ from usage import ToolUsage, UsageWindow, claude_profiles, collect_usage
 BAR_WIDTH = 24
 MAX_ACTIVE_ROWS = 6
 BANNER_TEXT = "JosephCode"
-# ligature-safe fonts only: coding fonts merge pairs like \/ and __ into
-# single glyphs, which melts slash-heavy art (slant, small, standard) into
-# fragments. thick and mini contain no ligature-prone pairs.
-BANNER_FONTS = ("thick", "mini")  # widest first; each is measured before use
+BANNER_FONTS = ("slant", "small")  # widest first; each is measured before use
 # columns never available to the banner: its own padding (2 per side) plus the
 # screen's vertical scrollbar, assumed always present so the art still fits if
 # the scrollbar pops in after data loads
@@ -389,9 +386,7 @@ class AdashApp(App):
     def _render_banner(self) -> None:
         banner = self.query_one("#banner", Static)
         art = _banner_art(self.size.width - BANNER_CHROME)
-        # no bold on the art: terminals without a true bold font synthesize it
-        # by overstriking, which smears dense figlet glyphs
-        banner.update(escape(art) if art else f"[bold]◆ {BANNER_TEXT}[/]")
+        banner.update(f"[bold]{escape(art)}[/]" if art else f"[bold]◆ {BANNER_TEXT}[/]")
 
     def _render_launch(self) -> None:
         chips = []
