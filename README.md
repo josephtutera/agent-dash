@@ -4,7 +4,7 @@ One terminal dashboard for your Claude Code, Codex, and OpenCode sessions:
 subscription usage, agents running right now, and your full searchable
 history, all in one place.
 
-![agent-dash screenshot](adash.png)
+<img width="3740" height="2438" alt="CleanShot 2026-07-20 at 13 27 43@2x" src="https://github.com/user-attachments/assets/a4735c00-ee6d-4f63-bcd7-ff029cd9235e" />
 
 ## Features
 
