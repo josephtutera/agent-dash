@@ -202,8 +202,10 @@ def test_opencode_usage_spend(opencode_db: Path):
 
     usage = fetch_opencode_usage(db_path=opencode_db)
     assert usage.error is None
-    assert "$0.50" in usage.note
-    assert "1 sessions" in usage.note
+    assert usage.plan == "pay-as-you-go"  # framed as a first-party plan, not "no subscription"
+    assert usage.spend == 0.50
+    assert usage.spend_sessions == 1
+    assert usage.spend_days == 7
 
 
 # ---------------------------------------------------------------- titles
@@ -409,13 +411,14 @@ def test_app_filter_and_resume(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
             await pilot.pause(0.1)
             assert table.row_count == 2
 
-            # chain is launch -> picker(dirs) -> history (no running agents)
+            # chain is launch -> picker(dirs + "other" row) -> history (no running agents)
             assert len(app.dirs) == 2  # cwd + /tmp from the fake sessions
             await pilot.press("down")  # launch -> picker[0]
             await pilot.pause(0.05)
             assert app.zone == "picker"
             await pilot.press("down")  # picker[0] -> picker[1]
-            await pilot.press("down")  # picker[1] (last) -> history
+            await pilot.press("down")  # picker[1] -> "open another directory" row
+            await pilot.press("down")  # "other" row (last) -> history
             await pilot.pause(0.1)
             assert app.zone == "history"
 
@@ -480,13 +483,14 @@ def test_navigation_through_active_rows(tmp_path: Path, monkeypatch: pytest.Monk
                 if len(app.running) == 2:
                     break
 
-            # chain: launch -> picker(2 dirs) -> active(2) -> history
+            # chain: launch -> picker(2 dirs + "other" row) -> active(2) -> history
             assert len(app.dirs) == 2
             await pilot.press("down")  # launch -> picker[0]
             await pilot.press("down")  # picker[0] -> picker[1]
+            await pilot.press("down")  # picker[1] -> "open another directory" row
             await pilot.pause(0.05)
             assert app.zone == "picker"
-            await pilot.press("down")  # picker[1] (last) -> active[0]
+            await pilot.press("down")  # "other" row (last) -> active[0]
             await pilot.pause(0.1)
             assert app.zone == "active" and app.active_idx == 0
 
@@ -1072,3 +1076,137 @@ def test_set_tab_title_skips_dumb_terminals(monkeypatch: pytest.MonkeyPatch, cap
     monkeypatch.setenv("TERM", "dumb")
     main_module.set_tab_title(main_module.TAB_TITLE)
     assert capsys.readouterr().out == ""
+
+
+# ---------------------------------------------------------------- worktree filter (item 2)
+
+
+def test_is_worktree_matches_codex_and_claude_paths():
+    assert app_module._is_worktree("/Users/x/.codex/worktrees/1e5a/prototype-ehr")
+    assert app_module._is_worktree("/Users/x/Repos/web-app/.claude/worktrees/foo")
+    assert not app_module._is_worktree("/Users/x/Repos/web-app")
+
+
+def test_recent_dirs_excludes_worktrees(monkeypatch: pytest.MonkeyPatch):
+    now = datetime.now(timezone.utc)
+    app = AdashApp()
+    app.sessions = [
+        Session(tool="claude", id="a", title="t", project_dir="/tmp/real-repo", last_active=now),
+        Session(tool="codex", id="b", title="t",
+                project_dir="/Users/x/.codex/worktrees/abc/web-app", last_active=now),
+    ]
+    paths = [d[0] for d in app._recent_dirs()]
+    assert "/tmp/real-repo" in paths
+    assert not any("/worktrees/" in p for p in paths)  # worktrees never offered
+
+
+# ---------------------------------------------------------------- open another directory (item 3)
+
+
+def test_other_directory_row_launches_typed_path(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    from textual.widgets import Input
+
+    opened = _launch_harness(tmp_path, monkeypatch)
+    target = tmp_path / "some-project"
+    target.mkdir()
+
+    async def run() -> None:
+        app = AdashApp(cmd_file=str(tmp_path / "cmd"))
+        async with app.run_test(size=(110, 40)) as pilot:
+            await _wait_for_table(pilot, app)
+            # walk down past every dir onto the "open another directory" row
+            for _ in range(len(app.dirs) + 1):
+                await pilot.press("down")
+            await pilot.pause(0.05)
+            assert app.zone == "picker" and app.picker_idx == len(app.dirs)
+            await pilot.press("enter")  # opens the path prompt
+            await pilot.pause(0.05)
+            dirinput = app.query_one("#dirinput", Input)
+            assert dirinput.display
+            dirinput.value = str(target)
+            await pilot.press("enter")  # submit the typed path
+            await pilot.pause(0.1)
+            assert not dirinput.display  # prompt closes after submit
+
+    asyncio.run(run())
+    slug = app_module._dir_slug(str(target))
+    assert opened == [["open", f"warp://tab_config/josephcode-claude-{slug}"]]
+
+
+def test_other_directory_rejects_missing_path(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    from textual.widgets import Input
+
+    opened = _launch_harness(tmp_path, monkeypatch)
+
+    async def run() -> None:
+        app = AdashApp(cmd_file=str(tmp_path / "cmd"))
+        async with app.run_test(size=(110, 40)) as pilot:
+            await _wait_for_table(pilot, app)
+            app._open_dir_input()
+            await pilot.pause(0.05)
+            dirinput = app.query_one("#dirinput", Input)
+            dirinput.value = str(tmp_path / "does-not-exist")
+            await pilot.press("enter")
+            await pilot.pause(0.1)
+            assert not dirinput.display
+
+    asyncio.run(run())
+    assert opened == []  # nothing launched for a bad path
+
+
+# ---------------------------------------------------------------- warp tab focus loop (item 4)
+
+
+def test_focus_warp_tab_stops_after_one_rotation(monkeypatch: pytest.MonkeyPatch):
+    # three tabs, none matching the hint; the active tab wraps around the set
+    titles = ["◆ JosephCode", "✳ tab two", "✳ tab three"]
+    state = {"i": 0}
+    calls = []
+
+    def fake_osa(script: str) -> tuple[bool, str]:
+        calls.append(script)
+        if "keystroke" in script:
+            state["i"] += 1
+            return True, ""
+        if "activate" in script:
+            return True, ""
+        return True, titles[state["i"] % len(titles)]
+
+    monkeypatch.setattr(app_module, "_osa", fake_osa)
+    result = app_module._focus_warp_tab(["no-such-tab"])
+    assert result == "activated"  # gave up cleanly, tab not found
+    # one full rotation only: never presses more than there are tabs (old code
+    # blindly pressed a fixed 16 times, spinning past every tab 3+ times)
+    assert sum("keystroke" in c for c in calls) == len(titles)
+
+
+# ---------------------------------------------------------------- aligned usage grid (item 1)
+
+
+def test_window_cell_has_fixed_visible_width():
+    from rich.text import Text
+    from usage import UsageWindow
+
+    present = Text.from_markup(app_module._window_cell(UsageWindow("5h", 42.0))).plain
+    absent = Text.from_markup(app_module._window_cell(None)).plain
+    assert len(present) == app_module.USAGE_CELL_W
+    assert len(absent) == app_module.USAGE_CELL_W  # missing windows still align
+
+
+def test_render_usage_aligns_columns_and_firstparty_opencode():
+    from rich.text import Text
+    from usage import ToolUsage, UsageWindow
+
+    app = AdashApp()
+    app.usages = [
+        ToolUsage(tool="claude", plan="Team", windows=[UsageWindow("5h", 16.0), UsageWindow("7d", 23.0)]),
+        ToolUsage(tool="codex", plan="Pro", windows=[UsageWindow("7d", 100.0)]),
+        ToolUsage(tool="opencode", plan="pay-as-you-go", spend=13.06, spend_sessions=5, spend_days=7),
+    ]
+    plain = Text.from_markup(app._usage_text()).plain
+    assert "5h" in plain and "7d" in plain  # single header labels the columns
+    assert "pay-as-you-go" in plain and "$13.06" in plain  # opencode as first-party
+    assert "no subscription" not in plain  # the old afterthought framing is gone
+    # the "5h" header sits directly above where the 5h bars start
+    header, first_row = plain.splitlines()[0], plain.splitlines()[1]
+    assert header.index("5h") == first_row.index("█")

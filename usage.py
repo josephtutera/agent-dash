@@ -41,6 +41,11 @@ class ToolUsage:
     error: str | None = None
     label: str = ""  # claude profile label (e.g. "personal"); "" when single-account
     active: bool = True  # for multi-profile claude: is this the plan new sessions use?
+    # BYOK tools (opencode) have no quota %, so they report dollar spend instead;
+    # the renderer drops this into the 7d column in place of a utilization bar.
+    spend: float | None = None
+    spend_sessions: int | None = None
+    spend_days: int = 7
 
 
 # ---------------------------------------------------------------- claude
@@ -289,7 +294,12 @@ def fetch_opencode_usage(db_path: Path | None = None) -> ToolUsage:
         return ToolUsage(tool="opencode", error=str(exc)[:60])
     return ToolUsage(
         tool="opencode",
-        note=f"no subscription · API spend 7d: ${spend:.2f} across {count} sessions",
+        plan="pay-as-you-go",
+        spend=float(spend),
+        spend_sessions=int(count),
+        spend_days=7,
+        # kept for the --usage text dump and back-compat; the TUI uses the fields
+        note=f"${spend:.2f} across {count} session{'s' if count != 1 else ''} · 7d",
     )
 
 

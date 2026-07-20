@@ -24,6 +24,16 @@ from models import TOOL_COLORS, Session, fmt_tokens, rel_time, resume_command
 from usage import ToolUsage, UsageWindow, claude_profiles, collect_usage
 
 BAR_WIDTH = 24
+# aligned subscriptions grid: fixed-width columns so every 5h bar lines up in
+# one column and every 7d bar in another, under a single header.
+USAGE_TOOL_W = 9  # colored tool name column (widest is "opencode" = 8)
+USAGE_PLAN_W = 14  # dim plan column, e.g. "Team·default", "pay-as-you-go"
+USAGE_BAR_W = 8  # mini utilization bar inside each window cell
+USAGE_RESET_W = 6  # compact reset time, e.g. "10:59a"
+USAGE_PCT_W = 4  # right-aligned percent, e.g. " 16%", "100%"
+# total visible width of one window cell (bar + space + pct + space + reset)
+USAGE_CELL_W = USAGE_BAR_W + 1 + USAGE_PCT_W + 1 + USAGE_RESET_W
+USAGE_GAP = "   "  # between the 5h and 7d columns
 MAX_ACTIVE_ROWS = 6
 BANNER_TEXT = "JosephCode"
 BANNER_FONTS = ("slant", "small")  # widest first; each is measured before use
@@ -59,13 +69,56 @@ def _truncate(text: str, width: int) -> str:
     return text[: width - 1] + "…" if len(text) > width else text
 
 
-def _bar(pct: float | None) -> str:
-    if pct is None:
-        return f"[dim]{'░' * BAR_WIDTH} n/a[/]"
-    filled = round(BAR_WIDTH * min(pct, 100.0) / 100.0)
+def _usage_color(pct: float) -> str:
     # instrument palette: calm blue until it runs warm, then amber, then red
-    color = "#7aa2f7" if pct < 60 else "#ffb454" if pct < 85 else "#ff5c57"
-    return f"[{color}]{'█' * filled}[/{color}][#1b2233]{'░' * (BAR_WIDTH - filled)}[/] {pct:.0f}%"
+    return "#7aa2f7" if pct < 60 else "#ffb454" if pct < 85 else "#ff5c57"
+
+
+def _bar(pct: float | None, width: int = BAR_WIDTH) -> str:
+    if pct is None:
+        return f"[dim]{'░' * width} n/a[/]"
+    filled = round(width * min(pct, 100.0) / 100.0)
+    return f"[{_usage_color(pct)}]{'█' * filled}[/][#1b2233]{'░' * (width - filled)}[/] {pct:.0f}%"
+
+
+def _fmt_reset_compact(dt: datetime | None) -> str:
+    """Reset time squeezed to fit a usage column: '10:59a', '5:30p', 'Jul24'."""
+    if dt is None:
+        return ""
+    now = datetime.now(timezone.utc)
+    local = dt.astimezone()
+    if dt - now < timedelta(hours=24):
+        return local.strftime("%-I:%M%p").lower().replace("am", "a").replace("pm", "p")
+    return local.strftime("%b%d")
+
+
+def _usage_bar(pct: float | None) -> str:
+    """Mini bar of exactly USAGE_BAR_W visible columns for the aligned grid."""
+    if pct is None:
+        return f"[#2a3348]{'░' * USAGE_BAR_W}[/]"
+    filled = round(USAGE_BAR_W * min(pct, 100.0) / 100.0)
+    return f"[{_usage_color(pct)}]{'█' * filled}[/][#1b2233]{'░' * (USAGE_BAR_W - filled)}[/]"
+
+
+def _window_cell(win: "UsageWindow | None") -> str:
+    """A fixed-width (USAGE_CELL_W) cell: mini-bar + percent + compact reset.
+
+    A missing window (a tool that doesn't report this limit) renders as an empty
+    bar with a dim dash, so the column still lines up with its neighbors.
+    """
+    pct = win.pct if win else None
+    bar = _usage_bar(pct)
+    if pct is None:
+        pct_markup = f"[#55647f]{'—'.rjust(USAGE_PCT_W)}[/]"
+    else:
+        pct_markup = f"[{_usage_color(pct)}]{f'{pct:.0f}%'.rjust(USAGE_PCT_W)}[/]"
+    reset = _fmt_reset_compact(win.resets_at) if win else ""
+    return f"{bar} {pct_markup} [dim]{reset.ljust(USAGE_RESET_W)}[/]"
+
+
+def _pad_visible(markup: str, visible_len: int, width: int) -> str:
+    """Right-pad a markup string to `width` visible columns."""
+    return markup + " " * max(0, width - visible_len)
 
 
 def _status_marker(state: str, frame: str, tool_color: str) -> str:
@@ -91,16 +144,6 @@ def _activity_detail(agent) -> str:
     if agent.tokens:
         bits.append(f"[dim]{fmt_tokens(agent.tokens)} tokens[/]")
     return " · ".join(bits)
-
-
-def _fmt_reset(dt: datetime | None) -> str:
-    if dt is None:
-        return ""
-    now = datetime.now(timezone.utc)
-    local = dt.astimezone()
-    if dt - now < timedelta(hours=24):
-        return local.strftime("%-I:%M%p").lower()
-    return local.strftime("%b %d")
 
 
 _TAB_COLORS = {"claude": "magenta", "codex": "green", "opencode": "blue", "terminal": "blue"}
@@ -135,18 +178,30 @@ def _focus_warp_tab(hints: list[str], max_tabs: int = 16) -> str:
     keystroke, which needs Accessibility permission. Returns "focused",
     "activated" (Warp is front-most but no tab matched), or "denied".
     """
-    ok, _ = _osa(_READ_TAB_TITLE)
+    ok, start_title = _osa(_READ_TAB_TITLE)
     if not ok:
         return "denied"
     _osa('tell application "Warp" to activate')
     lowered = [h.lower() for h in hints if h]
-    for _ in range(max_tabs):
+    for i in range(max_tabs):
         ok, title = _osa(_READ_TAB_TITLE)
         if ok and any(h in title.lower() for h in lowered):
             return "focused"
+        # once we cycle back to the tab we started on, we've seen them all;
+        # stop instead of rotating through the whole set again (the old code
+        # kept pressing a fixed 16 times, spinning past every tab 3+ times).
+        if i > 0 and ok and title == start_title:
+            return "activated"
         _osa(_NEXT_TAB)
         time.sleep(0.12)  # let Warp switch before re-reading the title
     return "activated"
+
+
+def _is_worktree(path: str) -> bool:
+    """True for throwaway agent worktrees (codex `~/.codex/worktrees/...`, Claude
+    Code `<repo>/.claude/worktrees/...`). These clutter the new-session picker
+    since you never start a fresh session in one."""
+    return "/worktrees/" in path
 
 
 def _dir_slug(cwd: str) -> str:
@@ -276,11 +331,9 @@ class AdashApp(App):
         height: auto;
         padding: 0 2 1 4;
     }
-    #spacer {
-        height: 1fr;
-    }
     #sessions {
-        height: 12;
+        height: 1fr;
+        min-height: 6;
         margin: 0 1 1 1;
         border: solid #1b2233;
     }
@@ -293,6 +346,9 @@ class AdashApp(App):
         text-style: none;
     }
     #search {
+        margin: 0 1;
+    }
+    #dirinput {
         margin: 0 1;
     }
     Footer {
@@ -347,9 +403,9 @@ class AdashApp(App):
         yield _ActivePanel("scanning processes…", id="active", classes="panel")
         yield Static(id="launch")
         yield Static(id="picker")
-        yield Static(id="spacer")
         yield _SessionsTable(id="sessions", cursor_type="none", zebra_stripes=True)
         yield Input(placeholder="search titles, prompts, projects…  (esc to close)", id="search")
+        yield Input(placeholder="directory path to open…  (~ ok · enter opens · esc cancels)", id="dirinput")
         yield Footer()
 
     def on_mount(self) -> None:
@@ -359,6 +415,9 @@ class AdashApp(App):
         search = self.query_one("#search", Input)
         search.display = False
         search.can_focus = False  # only focusable while the search box is open
+        dirinput = self.query_one("#dirinput", Input)
+        dirinput.display = False
+        dirinput.can_focus = False  # only focusable while the path prompt is open
         self.set_focus(None)  # keys flow to on_key / bindings, not an auto-focused widget
         self.query_one("#active", Static).border_title = "active now"
         self.query_one("#usage", Static).border_title = "subscriptions"
@@ -366,7 +425,6 @@ class AdashApp(App):
         self.dirs = self._recent_dirs()
         self._render_launch()
         self._render_picker()
-        self._fit_history()
         self.load_sessions()
         self.load_usage()
         self.load_running()
@@ -419,15 +477,15 @@ class AdashApp(App):
                 rows.append(f"[reverse] {row} [/]")
             else:
                 rows.append(f"  {row}")
+        other = "[#7aa2f7]+[/] open another directory…"
+        if self.zone == "picker" and self.picker_idx == len(self.dirs):
+            rows.append(f"[reverse] {other} [/]")
+        else:
+            rows.append(f"  {other}")
         n = len(self.picker_selected)
         verb = "open" if tool != "terminal" else "shell in"
         rows.append(f"[dim]launch {tool} in[/]   [#7aa2f7]⏎ {verb} {n} tab{'s' if n != 1 else ''}[/]   [dim]space toggles[/]")
         self.query_one("#picker", Static).update("\n".join(rows))
-
-    def _fit_history(self) -> None:
-        # the picker now sits above history too, so leave it more room up top
-        picker_rows = len(self.dirs) + 1
-        self.query_one("#sessions", DataTable).styles.height = max(5, min(10, self.size.height - 34 - picker_rows))
 
     # ------------------------------------------------------------- selection chain
 
@@ -452,6 +510,8 @@ class AdashApp(App):
             return  # a modal owns the keyboard
         if self.query_one("#search", Input).display:
             return  # the search box owns the keyboard while it's open
+        if self.query_one("#dirinput", Input).display:
+            return  # the path prompt owns the keyboard while it's open
         key = event.key
         if key not in ("enter", "left", "right", "up", "down", "space"):
             return
@@ -459,13 +519,15 @@ class AdashApp(App):
         table = self.query_one("#sessions", DataTable)
 
         if key == "enter":
-            if self.zone in ("launch", "picker"):
+            if self.zone == "picker" and self.picker_idx == len(self.dirs):
+                self._open_dir_input()  # the "open another directory…" row
+            elif self.zone in ("launch", "picker"):
                 self._launch(LAUNCH_TOOLS[self.launch_idx])
             elif self.zone == "active":
                 self._enter_active()
             else:
                 self.action_resume()
-        elif key == "space" and self.zone == "picker":
+        elif key == "space" and self.zone == "picker" and self.picker_idx < len(self.dirs):
             self.picker_selected.symmetric_difference_update({self.picker_idx})
             self._render_picker()
         elif key in ("left", "right") and self.zone in ("launch", "picker"):
@@ -484,7 +546,7 @@ class AdashApp(App):
                     self._render_picker()
             elif self.zone == "active":
                 if self.active_idx <= 0:
-                    self.picker_idx = max(0, len(self.dirs) - 1)
+                    self.picker_idx = len(self.dirs)  # land on the "other directory" row
                     self._set_zone("picker")
                 else:
                     self.active_idx -= 1
@@ -496,7 +558,7 @@ class AdashApp(App):
                         self.active_idx = len(self.running) - 1
                         self._set_zone("active")
                     else:
-                        self.picker_idx = max(0, len(self.dirs) - 1)
+                        self.picker_idx = len(self.dirs)  # land on the "other directory" row
                         self._set_zone("picker")
                 else:
                     table.move_cursor(row=row - 1)
@@ -505,7 +567,7 @@ class AdashApp(App):
                 self.picker_idx = 0
                 self._set_zone("picker")
             elif self.zone == "picker":
-                if self.picker_idx < len(self.dirs) - 1:
+                if self.picker_idx < len(self.dirs):  # step through dirs + the "other" row
                     self.picker_idx += 1
                     self._render_picker()
                 elif self.running:
@@ -570,13 +632,18 @@ class AdashApp(App):
         panel.update("\n".join(lines))
 
     def _title_for(self, agent: RunningAgent) -> str:
-        """Match a running process to its session via tool + working directory."""
+        """Match a running process to its session via tool + working directory.
+
+        When several sessions share the directory, take the most recently active
+        one: it's the likeliest match for the tab this agent is running in, and a
+        good title hint matters because a working agent overwrites its tab title
+        with its current task, so the directory name alone often won't match."""
         candidates = [
             s for s in self.sessions
             if s.tool == agent.tool and agent.cwd and s.project_dir == agent.cwd
         ]
         if candidates:
-            return candidates[0].title
+            return max(candidates, key=lambda s: s.last_active).title
         return Path(agent.cwd).name or "session"
 
     def _enter_active(self) -> None:
@@ -641,34 +708,52 @@ class AdashApp(App):
             )
         self._render_usage()
 
-    def _render_usage(self) -> None:
-        lines = []
+    def _usage_prefix(self, usage: ToolUsage) -> str:
+        """Marker + tool + plan columns, padded to a fixed visible width."""
+        color = TOOL_COLORS[usage.tool]
+        if usage.label:  # multi-account claude: active/inactive marker + label
+            marker = "[#7aa2f7]◉[/]" if usage.active else "[#55647f]○[/]"
+            plan_text = f"{usage.plan}·{usage.label}" if usage.plan else usage.label
+        else:
+            marker = f"[{color}]●[/{color}]"
+            plan_text = usage.plan
+        tool_seg = _pad_visible(f"[{color}]{usage.tool}[/{color}]", len(usage.tool), USAGE_TOOL_W)
+        plan_disp = _truncate(plan_text, USAGE_PLAN_W - 1)
+        plan_seg = _pad_visible(f"[dim]{escape(plan_disp)}[/]", len(plan_disp), USAGE_PLAN_W)
+        return f"{marker} {tool_seg}{plan_seg}"
+
+    def _usage_text(self) -> str:
+        header = _pad_visible("", 0, 2) + "[dim]" + (
+            _pad_visible("plan", 4, USAGE_TOOL_W + USAGE_PLAN_W)
+            + _pad_visible("5h", 2, USAGE_CELL_W + len(USAGE_GAP))
+            + "7d"
+        ) + "[/]"
+        lines = [header]
         for usage in self.usages:
-            color = TOOL_COLORS[usage.tool]
-            if usage.label:  # multi-account claude: active/inactive marker + label
-                dot = "[#7aa2f7]◉[/]" if usage.active else "[#55647f]○[/]"
-                head = f"{dot} [{color}]{usage.tool}[/{color}]"
-                plan_text = f"{usage.plan} · {usage.label}" if usage.plan else usage.label
-            else:
-                head = f"[{color}]● {usage.tool}[/{color}]"
-                plan_text = usage.plan
-            pad = " " * (10 - len(usage.tool))
-            plan = f"[dim]{escape(plan_text)}[/]" if plan_text else ""
+            prefix = self._usage_prefix(usage)
             if usage.error:
-                lines.append(f"{head}{pad}{plan} [dim]{escape(usage.error)}[/]")
+                lines.append(f"{prefix}[dim]{escape(usage.error)}[/]")
                 continue
-            parts = [f"{head}{pad}{plan}"]
-            for window in usage.windows:
-                reset = _fmt_reset(window.resets_at)
-                reset_text = f" [dim]resets {reset}[/]" if reset else ""
-                parts.append(f"[dim]{window.label}[/] {_bar(window.pct)}{reset_text}")
-            if usage.note:
-                parts.append(f"[dim]{escape(usage.note)}[/]")
-            lines.append("  ".join(parts))
+            if usage.spend is not None:  # BYOK: dollar spend fills the 7d column
+                empty = _pad_visible("[#55647f]—[/]", 1, USAGE_CELL_W)
+                sess = usage.spend_sessions or 0
+                spend_cell = (
+                    f"[#c7d4f0]${usage.spend:.2f}[/] "
+                    f"[dim]· {sess} session{'s' if sess != 1 else ''} · {usage.spend_days}d[/]"
+                )
+                lines.append(f"{prefix}{empty}{USAGE_GAP}{spend_cell}")
+                continue
+            windows = {w.label: w for w in usage.windows}
+            cell_5h = _window_cell(windows.get("5h"))
+            cell_7d = _window_cell(windows.get("7d"))
+            lines.append(f"{prefix}{cell_5h}{USAGE_GAP}{cell_7d}")
         multi = sum(1 for u in self.usages if u.tool == "claude" and u.label) > 1
         if multi:
             lines.append("[dim]↹ tab switches the active claude plan[/]")
-        self.query_one("#usage", Static).update("\n".join(lines))
+        return "\n".join(lines)
+
+    def _render_usage(self) -> None:
+        self.query_one("#usage", Static).update(self._usage_text())
 
     # ------------------------------------------------------------- history
 
@@ -680,11 +765,10 @@ class AdashApp(App):
     def _on_loaded(self, sessions: list[Session]) -> None:
         self.sessions = sessions
         self.dirs = self._recent_dirs()
-        self.picker_idx = min(self.picker_idx, max(0, len(self.dirs) - 1))
+        self.picker_idx = min(self.picker_idx, len(self.dirs))  # len(dirs) == the "other" row
         if not self.picker_selected:
             self.picker_selected = {0}
         self._render_picker()
-        self._fit_history()
         self._populate()
         self.load_running()
 
@@ -759,7 +843,7 @@ class AdashApp(App):
         last: dict[str, datetime] = {}
         for s in self.sessions:
             d = s.project_dir
-            if not d:
+            if not d or _is_worktree(d):  # never offer to start fresh in a worktree
                 continue
             count[d] = count.get(d, 0) + 1
             if d not in last or s.last_active > last[d]:
@@ -780,10 +864,12 @@ class AdashApp(App):
         chosen = [self.dirs[i][0] for i in sorted(self.picker_selected) if i < len(self.dirs)]
         return chosen or [os.getcwd()]
 
-    def _launch(self, tool: str) -> None:
-        """Open a Warp tab per selected directory running `tool` (a bare shell
-        for `terminal`). Claude uses the active plan's CLAUDE_CONFIG_DIR."""
-        dirs = self._selected_dirs()
+    def _launch(self, tool: str, dirs: list[str] | None = None) -> None:
+        """Open a Warp tab per directory running `tool` (a bare shell for
+        `terminal`). Defaults to the picker's selected dirs; a caller can pass an
+        explicit list (e.g. a typed-in path). Claude uses the active plan's
+        CLAUDE_CONFIG_DIR."""
+        dirs = dirs if dirs is not None else self._selected_dirs()
         env: dict = {}
         plan = ""
         if tool == "claude":
@@ -860,9 +946,38 @@ class AdashApp(App):
         self.set_focus(None)
         self._populate()
 
+    def _open_dir_input(self) -> None:
+        """Prompt for a directory path to open that isn't in the recent list."""
+        dirinput = self.query_one("#dirinput", Input)
+        dirinput.value = ""
+        dirinput.can_focus = True
+        dirinput.display = True
+        dirinput.focus()
+
+    def _close_dir_input(self) -> None:
+        dirinput = self.query_one("#dirinput", Input)
+        dirinput.value = ""
+        dirinput.display = False
+        dirinput.can_focus = False
+        self.set_focus(None)
+
+    @on(Input.Submitted, "#dirinput")
+    def _on_dir_submitted(self, event: Input.Submitted) -> None:
+        raw = event.value.strip()
+        self._close_dir_input()
+        if not raw:
+            return
+        path = Path(raw).expanduser()
+        if not path.is_dir():
+            self.notify(f"not a directory: {raw}", severity="error", timeout=4)
+            return
+        self._launch(LAUNCH_TOOLS[self.launch_idx], dirs=[str(path)])
+
     def action_escape(self) -> None:
         if self.query_one("#search", Input).display:
             self._close_search()
+        elif self.query_one("#dirinput", Input).display:
+            self._close_dir_input()
 
     def _set_filter(self, tool: str) -> None:
         self.tool_filter = tool
@@ -886,6 +1001,5 @@ class AdashApp(App):
 
     def on_resize(self) -> None:
         self._render_banner()
-        self._fit_history()
         if self.sessions:
             self._populate()
