@@ -1,4 +1,7 @@
 import SwiftUI
+#if canImport(AppKit)
+import AppKit
+#endif
 
 // The click-through card. A panel-glass surface with, top to bottom: one
 // section per subscription, an AGENTS section, a VALUE AT API RATES section,
@@ -325,6 +328,18 @@ struct FooterView: View {
                 .font(Theme.label(10))
                 .foregroundStyle(Theme.muted)
             Spacer()
+            // Quit: an accessory app has no dock icon or app menu, so the card
+            // (and the pill's right-click menu) are the only ways out.
+            HStack(spacing: 4) {
+                Image(systemName: "power")
+                    .font(.system(size: 9, weight: .semibold))
+                Text("quit")
+                    .font(Theme.label(10))
+            }
+            .foregroundStyle(Theme.muted)
+            .contentShape(Rectangle())
+            .onTapGesture { AppActions.quit() }
+            .padding(.trailing, 12)
             HStack(spacing: 6) {
                 Text("open agent dash")
                     .font(Theme.label(10))
@@ -388,5 +403,14 @@ public enum AppActions {
     /// Open the new-session launcher (pick a tool + directory). Wired in phase 3.
     public static func openLauncher() {
         openAgentDash()
+    }
+
+    /// Quit the HUD. There's no dock icon or app menu (it's an accessory app),
+    /// so this is the only way out short of `kill`; the footer button and the
+    /// pill's right-click menu both call it.
+    public static func quit() {
+        #if canImport(AppKit)
+        NSApplication.shared.terminate(nil)
+        #endif
     }
 }

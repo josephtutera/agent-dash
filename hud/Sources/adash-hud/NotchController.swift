@@ -140,6 +140,9 @@ private struct NotchRoot: View {
         .onHover { hovering in
             state.onHoverChange?(hovering)
         }
+        .contextMenu {
+            Button("Quit Agent Dash HUD") { AppActions.quit() }
+        }
         .fixedSize()
     }
 }

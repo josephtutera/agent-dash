@@ -38,6 +38,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             ])
             button.target = self
             button.action = #selector(togglePanel)
+            // Left-click toggles the card; right-click offers Quit (this app has
+            // no dock icon or menu bar of its own).
+            button.sendAction(on: [.leftMouseUp, .rightMouseUp])
         }
 
         NotificationCenter.default.addObserver(
@@ -76,11 +79,35 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     // MARK: - Menubar card panel
 
     @objc private func togglePanel() {
+        if NSApp.currentEvent?.type == .rightMouseUp {
+            showStatusMenu()
+            return
+        }
         if let panel, panel.isVisible {
             panel.orderOut(nil)
             return
         }
         showPanel()
+    }
+
+    private func showStatusMenu() {
+        let menu = NSMenu()
+        menu.addItem(
+            withTitle: "Quit Agent Dash HUD",
+            action: #selector(quitApp),
+            keyEquivalent: "q"
+        )
+        if let button = statusItem.button {
+            menu.popUp(
+                positioning: nil,
+                at: NSPoint(x: 0, y: button.bounds.height + 4),
+                in: button
+            )
+        }
+    }
+
+    @objc private func quitApp() {
+        AppActions.quit()
     }
 
     private func showPanel() {
