@@ -18,7 +18,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 import app as app_module
 import collectors
 from app import AdashApp
-from models import Session, resume_command
+from models import Session, resume_command, resume_directory, resume_invocation
 from textual.widgets import DataTable, Static
 
 # ---------------------------------------------------------------- fixtures
@@ -182,6 +182,20 @@ def test_resume_command_missing_dir_falls_home():
     cmd = resume_command(s)
     assert "codex resume xyz" in cmd
     assert "/does/not/exist" not in cmd
+
+
+def test_resume_invocation_has_no_cd_and_directory_falls_home(tmp_path: Path):
+    # The Warp resume tab sets the directory itself, so the invocation must be
+    # the bare tool command with no `cd`.
+    here = Session(tool="claude", id="abc", title="t", project_dir=str(tmp_path),
+                   last_active=datetime.now(timezone.utc))
+    assert resume_invocation(here) == "claude --resume abc"
+    assert resume_directory(here) == str(tmp_path)
+
+    gone = Session(tool="opencode", id="s1", title="t", project_dir="/does/not/exist",
+                   last_active=datetime.now(timezone.utc))
+    assert resume_invocation(gone) == "opencode --session s1"
+    assert resume_directory(gone) == str(Path.home())
 
 
 # ---------------------------------------------------------------- usage
@@ -602,7 +616,15 @@ def test_app_filter_and_resume(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(app_module, "collect_all", lambda limit=300: _fake_sessions())
     _stub_usage(monkeypatch)
     _stub_running(monkeypatch)
+    monkeypatch.setattr(app_module, "_warp_configs_dir", lambda: tmp_path / "tab_configs")
     cmd_file = tmp_path / "cmd"
+    opened: list = []
+
+    class FakePopen:
+        def __init__(self, args, **kwargs):
+            opened.append(args)
+
+    monkeypatch.setattr(app_module, "Popen", FakePopen)
 
     async def run() -> None:
         app = AdashApp(cmd_file=str(cmd_file))
@@ -630,11 +652,17 @@ def test_app_filter_and_resume(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
             await pilot.pause(0.1)
             assert app.zone == "history"
 
-            await pilot.press("enter")  # resume first row (claude)
+            await pilot.press("enter")  # resume first row (claude abc)
             await pilot.pause(0.1)
 
     asyncio.run(run())
-    assert cmd_file.read_text().strip() == "cd /tmp && claude --resume abc"
+    # Resume opens a fresh Warp tab running the resume command, not an in-place
+    # shell command written back to the terminal.
+    assert opened == [["open", "warp://tab_config/agentdash-claude-resume-abc"]]
+    config = (tmp_path / "tab_configs" / "agentdash-claude-resume-abc.toml").read_text()
+    assert 'commands = ["claude --resume abc"]' in config
+    assert 'directory = "/tmp"' in config
+    assert not cmd_file.exists()  # nothing written back to the shell
 
 
 def test_selection_starts_on_claude_and_navigates(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
