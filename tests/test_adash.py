@@ -123,6 +123,28 @@ def test_codex_collector_merges_and_filters(codex_root: Path):
     assert s.first_prompt == "fix the bug"
 
 
+def test_codex_collector_titles_current_user_message_events(tmp_path: Path):
+    """Codex 0.145 writes the typed prompt in event_msg, not response_item."""
+    root = tmp_path / "codex"
+    sid = "aaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+    _write_jsonl(
+        root / "sessions" / "2026" / "07" / "21" / f"rollout-{sid}.jsonl",
+        [
+            {"type": "session_meta", "payload": {"session_id": sid, "cwd": "/tmp/cx", "thread_source": "user"}},
+            {"type": "response_item", "payload": {"type": "message", "role": "user",
+             "content": [{"type": "input_text", "text": "# AGENTS.md instructions"}]}},
+            {"type": "event_msg", "payload": {"type": "user_message",
+             "message": "[Image #1] can you figure out why codex titles are missing?"}},
+        ],
+    )
+
+    sessions = collectors.collect_codex(root=root)
+
+    assert len(sessions) == 1
+    assert sessions[0].first_prompt == "[Image #1] can you figure out why codex titles are missing?"
+    assert sessions[0].title == "[Image #1] can you figure out why codex titles are missing?"
+
+
 def test_opencode_collector(opencode_db: Path):
     sessions = collectors.collect_opencode(db_path=opencode_db)
     assert len(sessions) == 1  # archived session excluded
@@ -421,6 +443,19 @@ def test_parse_ps_detects_only_terminal_agents():
     assert opencode.elapsed == "1h 48m"
 
 
+def test_parse_ps_keeps_one_codex_agent_per_terminal():
+    from agents import _parse_ps
+
+    ps_output = """\
+ 60200 ttys007      03:45 node /Users/josephtutera/.nvm/versions/node/v24.14.1/bin/codex
+ 60201 ttys007      03:45 /Users/josephtutera/.nvm/versions/node/v24.14.1/lib/node_modules/@openai/codex/vendor/bin/codex
+"""
+
+    agents = _parse_ps(ps_output)
+
+    assert [(agent.tool, agent.pid, agent.tty) for agent in agents] == [("codex", 60200, "ttys007")]
+
+
 def test_elapsed_formatting():
     from agents import _elapsed
 
@@ -480,6 +515,51 @@ def test_title_falls_back_to_directory_when_sessions_run_out():
     c = RunningAgent(tool="claude", pid=3, tty="ttys003", elapsed="1m", cwd="/tmp/proj")
     app = _titled_app(a, b, c)  # only two claude sessions exist for this dir
     assert app._title_for(a) == "proj"
+
+
+def test_claude_session_id_read_from_pid_file(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    # Claude Code writes ~/.claude/sessions/<pid>.json naming the live transcript;
+    # reading it is what lets a running agent resolve to its exact session.
+    import agents as agents_module
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    sessions_dir = tmp_path / ".claude" / "sessions"
+    sessions_dir.mkdir(parents=True)
+    (sessions_dir / "56817.json").write_text(json.dumps(
+        {"pid": 56817, "sessionId": "4b5d8bef-52fc", "status": "busy"}))
+    assert agents_module._claude_session_id_for_pid(56817) == "4b5d8bef-52fc"
+    assert agents_module._claude_session_id_for_pid(99999) == ""  # no file for this pid
+    (sessions_dir / "42.json").write_text("not json{")
+    assert agents_module._claude_session_id_for_pid(42) == ""  # malformed, tolerated
+
+
+def test_running_agents_tags_claude_with_its_exact_session_id(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    # end-to-end guard for the mislabel bug: a running claude agent must carry
+    # its real session id, not just its directory, so recency can't override it.
+    import agents as agents_module
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    sessions_dir = tmp_path / ".claude" / "sessions"
+    sessions_dir.mkdir(parents=True)
+    (sessions_dir / "56817.json").write_text(json.dumps({"sessionId": "sess-4b5d"}))
+
+    class _Result:
+        def __init__(self, stdout: str):
+            self.stdout = stdout
+
+    def fake_run(cmd, **kwargs):
+        if cmd[0] == "ps":
+            return _Result("56817 ttys003 05:00 claude\n")
+        if cmd[0] == "lsof":
+            return _Result("p56817\nn/Users/josephtutera/Repos/agent-dash\n")
+        return _Result("")
+
+    monkeypatch.setattr(agents_module.subprocess, "run", fake_run)
+    agents = agents_module.running_agents()
+    assert len(agents) == 1
+    assert agents[0].tool == "claude"
+    assert agents[0].session_id == "sess-4b5d"
+    assert agents[0].cwd == "/Users/josephtutera/Repos/agent-dash"
 
 
 # ---------------------------------------------------------------- tui
@@ -772,7 +852,6 @@ def test_clear_and_undo_history(tmp_path: Path, monkeypatch: pytest.MonkeyPatch)
     monkeypatch.setattr(app_module, "collect_all", lambda limit=300: sessions)
     _stub_usage(monkeypatch)
     _stub_running(monkeypatch)
-    monkeypatch.setattr(app_module, "_cleared_file", lambda: tmp_path / "cleared-at")
 
     async def run() -> None:
         app = AdashApp(cmd_file=str(tmp_path / "cmd"))
@@ -780,14 +859,128 @@ def test_clear_and_undo_history(tmp_path: Path, monkeypatch: pytest.MonkeyPatch)
             table = app.query_one("#sessions", DataTable)
             await _wait_for_table(pilot, app)
             assert table.row_count == 3
+            assert "C clears" in (table.border_subtitle or "")
 
             await pilot.press("C")  # clear: hide everything seen so far
             await pilot.pause(0.1)
             assert table.row_count == 0
+            # the toast fades, so the border must keep advertising the way back
+            assert "u to restore" in (table.border_subtitle or "")
+            assert "(cleared)" in (table.border_title or "")
 
             await pilot.press("u")  # undo
             await pilot.pause(0.1)
             assert table.row_count == 3
+            assert "C clears" in (table.border_subtitle or "")
+
+    asyncio.run(run())
+
+
+def test_clear_history_does_not_persist_across_launches(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    # An accidental C used to write a marker to disk and reload it on every
+    # launch, hiding history forever. Clearing must be scoped to the live run:
+    # a fresh app always starts with the full history visible.
+    monkeypatch.setattr(app_module, "collect_all", lambda limit=300: _fake_sessions())
+    _stub_usage(monkeypatch)
+    _stub_running(monkeypatch)
+
+    async def run() -> None:
+        first = AdashApp(cmd_file=str(tmp_path / "cmd"))
+        async with first.run_test(size=(110, 32)) as pilot:
+            await _wait_for_table(pilot, first)
+            await pilot.press("C")
+            await pilot.pause(0.1)
+            assert first.cleared_at is not None
+
+        # a brand-new instance (as if adash were relaunched) is never cleared
+        second = AdashApp(cmd_file=str(tmp_path / "cmd"))
+        assert second.cleared_at is None
+        async with second.run_test(size=(110, 32)) as pilot:
+            await _wait_for_table(pilot, second)
+            assert second.query_one("#sessions", DataTable).row_count == 2
+
+    asyncio.run(run())
+
+
+def test_active_panel_sits_below_the_new_session_selector(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    # active-now renders under the launcher/picker so the visual order matches
+    # the keyboard chain (launch -> picker -> active -> history).
+    monkeypatch.setattr(app_module, "collect_all", lambda limit=300: _fake_sessions())
+    _stub_usage(monkeypatch)
+    _stub_running(monkeypatch)
+
+    async def run() -> None:
+        app = AdashApp(cmd_file=str(tmp_path / "cmd"))
+        async with app.run_test(size=(110, 32)) as pilot:
+            await _wait_for_table(pilot, app)
+            launch_y = app.query_one("#launch").region.y
+            picker_y = app.query_one("#picker").region.y
+            active_y = app.query_one("#active").region.y
+            sessions_y = app.query_one("#sessions").region.y
+            assert launch_y < picker_y < active_y < sessions_y
+
+    asyncio.run(run())
+
+
+def test_history_auto_refresh_shows_new_sessions(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    # the session list used to load once at startup; a session started (or the
+    # one you're in) never appeared without a manual r. It must poll and update.
+    monkeypatch.setattr(app_module, "HISTORY_POLL_SECONDS", 0.2)
+    state = {"sessions": _fake_sessions()}
+    monkeypatch.setattr(app_module, "collect_all", lambda limit=300: list(state["sessions"]))
+    _stub_usage(monkeypatch)
+    _stub_running(monkeypatch)
+
+    async def run() -> None:
+        app = AdashApp(cmd_file=str(tmp_path / "cmd"))
+        async with app.run_test(size=(110, 32)) as pilot:
+            table = app.query_one("#sessions", DataTable)
+            await _wait_for_table(pilot, app)
+            assert table.row_count == 2
+
+            newer = Session(tool="claude", id="new", title="Brand new", project_dir="/tmp",
+                            last_active=datetime.now(timezone.utc), tokens=1, n_messages=1,
+                            first_prompt="just started")
+            state["sessions"] = [newer] + _fake_sessions()
+            for _ in range(60):
+                await pilot.pause(0.05)
+                if table.row_count == 3:
+                    break
+            assert table.row_count == 3
+
+    asyncio.run(run())
+
+
+def test_history_refresh_preserves_selected_session(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    # a background refresh rebuilds the table; if a new row lands on top it must
+    # not drag the cursor onto a different session than the one you had selected.
+    monkeypatch.setattr(app_module, "HISTORY_POLL_SECONDS", 0.2)
+    state = {"sessions": _fake_sessions()}  # [abc (claude), xyz (codex)]
+    monkeypatch.setattr(app_module, "collect_all", lambda limit=300: list(state["sessions"]))
+    _stub_usage(monkeypatch)
+    _stub_running(monkeypatch)  # no running agents: chain is launch -> picker -> history
+
+    async def run() -> None:
+        app = AdashApp(cmd_file=str(tmp_path / "cmd"))
+        async with app.run_test(size=(110, 32)) as pilot:
+            table = app.query_one("#sessions", DataTable)
+            await _wait_for_table(pilot, app)
+            for _ in range(4):  # launch -> picker[0] -> picker[1] -> "other" -> history
+                await pilot.press("down")
+                await pilot.pause(0.05)
+            assert app.zone == "history"
+            assert app.filtered[table.cursor_row].id == "abc"
+
+            newer = Session(tool="claude", id="new", title="Brand new", project_dir="/tmp",
+                            last_active=datetime.now(timezone.utc), tokens=1, n_messages=1,
+                            first_prompt="just started")
+            state["sessions"] = [newer] + _fake_sessions()
+            for _ in range(60):
+                await pilot.pause(0.05)
+                if table.row_count == 3:
+                    break
+            assert table.row_count == 3
+            assert app.filtered[table.cursor_row].id == "abc"  # still on the same session
 
     asyncio.run(run())
 
@@ -1530,6 +1723,19 @@ def test_render_usage_aligns_columns_and_firstparty_opencode():
     # the "5h" header sits directly above where the 5h bars start
     header, first_row = plain.splitlines()[0], plain.splitlines()[1]
     assert header.index("5h") == first_row.index("█")
+
+
+def test_render_usage_hides_windows_no_tool_reports():
+    from rich.text import Text
+    from usage import ToolUsage, UsageWindow
+
+    app = AdashApp()
+    app.usages = [ToolUsage(tool="codex", plan="Pro", windows=[UsageWindow("7d", 0.0)])]
+
+    plain = Text.from_markup(app._usage_text()).plain
+
+    assert "7d" in plain
+    assert "5h" not in plain
 
 
 def test_render_usage_adds_fable_column_only_where_present():

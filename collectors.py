@@ -183,7 +183,7 @@ def collect_claude(root: Path | None = None, limit: int = DEFAULT_LIMIT, cache: 
 
 # ---------------------------------------------------------------- codex
 
-_CODEX_NEEDLES = ("session_meta", "token_count", '"role":"user"', '"role": "user"', '"role":"assistant"', '"role": "assistant"')
+_CODEX_NEEDLES = ("session_meta", "token_count", "user_message", '"role":"user"', '"role": "user"', '"role":"assistant"', '"role": "assistant"')
 
 
 def _load_codex_index(root: Path) -> dict[str, str]:
@@ -235,6 +235,14 @@ def _parse_codex_file(path: Path) -> Session | None:
                     # token_count events are cumulative, so the last one is the file's total
                     if total.get("total_tokens"):
                         tokens = int(total["total_tokens"])
+                elif kind == "event_msg" and payload.get("type") == "user_message":
+                    # Codex 0.145 records the human's actual message here;
+                    # response_item user messages are now mostly injected context.
+                    text = _user_text(payload.get("message"))
+                    if text is not None:
+                        n_messages += 1
+                        if not first_prompt:
+                            first_prompt = text
                 elif kind == "response_item" and payload.get("type") == "message":
                     role = payload.get("role")
                     if role == "user":
