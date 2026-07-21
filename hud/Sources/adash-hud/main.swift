@@ -2,11 +2,11 @@ import AppKit
 import HUDCore
 
 // Entry point. Three modes:
-//   adash-hud                                -> run the HUD (notch or menubar)
-//   adash-hud --render-preview out.png       -> render the card to a PNG and exit
-//   adash-hud --render-preview-notch out.png -> render the notch pill (collapsed
-//                                               and hover-expanded) and exit
-// The preview modes are how reviewers (and CI) see the UI without a menubar.
+//   adash-hud                                   -> run the menu-bar HUD
+//   adash-hud --render-preview out.png          -> render the card to a PNG and exit
+//   adash-hud --render-preview-menubar out.png  -> render the menu-bar glance and
+//                                                  its dropdown card, then exit
+// The preview modes are how reviewers (and CI) see the UI headlessly.
 
 let args = CommandLine.arguments
 
@@ -33,8 +33,8 @@ func runRender(_ flag: String, defaultName: String, render: @MainActor (URL) thr
 runRender("--render-preview", defaultName: "preview.png") { url in
     try PreviewRenderer.renderCardPNG(to: url, scale: 2)
 }
-runRender("--render-preview-notch", defaultName: "preview-notch.png") { url in
-    try PreviewRenderer.renderNotchPNG(to: url, scale: 2)
+runRender("--render-preview-menubar", defaultName: "preview-menubar.png") { url in
+    try PreviewRenderer.renderMenubarPNG(to: url, scale: 2)
 }
 
 MainActor.assumeIsolated {

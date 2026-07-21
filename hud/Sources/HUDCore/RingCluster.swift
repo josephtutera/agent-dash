@@ -57,9 +57,12 @@ public struct RingCluster: View {
     }
 }
 
-/// The full menubar item: the three mini clusters (Team, Personal, Codex) plus
-/// the soonest-reset countdown in monospaced amber. Offline collapses to three
-/// gray rings and no countdown.
+/// The menu-bar status-item content: the glance. One colored dot per running
+/// agent (spinning while it works, amber pip when it needs you, dim when idle)
+/// followed by a single severity ring for the tightest quota, so a plan running
+/// dry still warns. Clicking the item opens the full card. Offline collapses to
+/// one dim ring. The dots here are non-interactive — the whole status item is
+/// one click target — so they carry no tap gestures.
 public struct MenuBarContentView: View {
     public let snapshot: HUDSnapshot?
     public var now: Date
@@ -69,36 +72,25 @@ public struct MenuBarContentView: View {
         self.now = now
     }
 
-    // Fixed presentation order regardless of daemon ordering.
-    private static let order = ["claude-team", "claude-personal", "codex"]
-
-    private var orderedSubs: [Subscription] {
-        guard let snap = snapshot else { return [] }
-        return Self.order.compactMap { id in snap.subscriptions.first { $0.id == id } }
+    private var agents: [Agent] {
+        (snapshot?.agents ?? []).sorted { $0.pid < $1.pid }
     }
 
     public var body: some View {
-        HStack(spacing: 5) {
-            if let snap = snapshot, !orderedSubs.isEmpty {
-                ForEach(orderedSubs) { sub in
-                    RingCluster(rings: sub.miniRings)
-                        .opacity(sub.clusterOpacity)
+        HStack(spacing: 7) {
+            if let snap = snapshot {
+                let colors = AgentColors.assign(snap.agents)
+                ForEach(agents) { agent in
+                    AgentDot(agent: agent, color: colors[agent.pid] ?? Theme.muted, diameter: 16)
                 }
-                if let soonest = snap.soonestReset {
-                    Text(Fmt.countdown(to: soonest.resetsAt, now: now))
-                        .font(Theme.mono(11, weight: .medium))
-                        .foregroundStyle(Theme.amber)
-                        .monospacedDigit()
+                if let worst = snap.worstWindow {
+                    RingCluster(rings: [worst], diameter: 16, strokeWidth: 2)
                 }
             } else {
-                // Offline: three gray rings, no countdown.
-                ForEach(0..<3, id: \.self) { _ in
-                    RingCluster(session: nil, weekly: nil)
-                        .opacity(0.35)
-                }
+                RingCluster(session: nil, weekly: nil, diameter: 16).opacity(0.35)
             }
         }
-        .padding(.horizontal, 4)
+        .padding(.horizontal, 5)
         .frame(height: 22)
     }
 }

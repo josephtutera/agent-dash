@@ -1,38 +1,10 @@
 import XCTest
 @testable import HUDCore
 
-/// Phase 4 coverage: the display-mode policy, the ring derivations feeding the
-/// notch and menubar clusters, and a headless render of the notch pill.
-final class NotchTests: XCTestCase {
-
-    // MARK: - ModePolicy
-
-    private func builtIn(notch: Bool) -> DisplayInfo {
-        DisplayInfo(isBuiltIn: true, notchHeight: notch ? 37 : 0, notchWidth: notch ? 180 : 0)
-    }
-    private var external: DisplayInfo {
-        DisplayInfo(isBuiltIn: false, notchHeight: 0, notchWidth: 0)
-    }
-
-    func testSoleNotchedBuiltInGetsNotchMode() {
-        XCTAssertEqual(ModePolicy.mode(for: [builtIn(notch: true)]), .notch)
-    }
-
-    func testExternalAttachedFallsBackToMenubar() {
-        XCTAssertEqual(ModePolicy.mode(for: [builtIn(notch: true), external]), .menubar)
-    }
-
-    func testClamshellExternalOnlyIsMenubar() {
-        XCTAssertEqual(ModePolicy.mode(for: [external]), .menubar)
-    }
-
-    func testNotchlessBuiltInNeverGetsAFakeNotch() {
-        XCTAssertEqual(ModePolicy.mode(for: [builtIn(notch: false)]), .menubar)
-    }
-
-    func testNoDisplaysIsMenubar() {
-        XCTAssertEqual(ModePolicy.mode(for: []), .menubar)
-    }
+/// The ring derivations feeding the cluster views, the per-agent color
+/// assignment, the tightest-quota derivation for the menu-bar glance, and a
+/// headless render of that glance plus its card.
+final class HUDViewTests: XCTestCase {
 
     // MARK: - Ring derivations
 
@@ -65,7 +37,6 @@ final class NotchTests: XCTestCase {
     }
 
     func testMiniInnerRingIsTightestWeekly() {
-        // Fable at 12% left is tighter than 7d at 61%, so the 18pt mini shows it.
         let rings = sub(windows: [session, weekly, fable]).miniRings
         XCTAssertEqual(rings.count, 2)
         XCTAssertEqual(rings[1]?.kind, "weekly_fable")
@@ -95,7 +66,6 @@ final class NotchTests: XCTestCase {
         XCTAssertEqual(a[10], b[10])
         XCTAssertEqual(a[20], b[20])
         XCTAssertEqual(a[30], b[30])
-        // Lowest pid gets the first palette slot.
         XCTAssertEqual(a[10], Theme.agentColor(0))
         XCTAssertEqual(a[30], Theme.agentColor(2))
     }
@@ -104,12 +74,11 @@ final class NotchTests: XCTestCase {
         XCTAssertTrue(agent(pid: 1, state: "waiting").isWaiting)
         XCTAssertTrue(agent(pid: 1, state: "working").isWorking)
         XCTAssertTrue(agent(pid: 1, state: "idle").isIdle)
-        // An unknown status reads as idle, not working or waiting.
-        XCTAssertTrue(agent(pid: 1, state: "zombie").isIdle)
+        XCTAssertTrue(agent(pid: 1, state: "zombie").isIdle) // unknown -> idle
         XCTAssertFalse(agent(pid: 1, state: "working").isIdle)
     }
 
-    // MARK: - Compact-face worst-quota ring
+    // MARK: - Glance worst-quota ring
 
     private func subWithTightest(_ pct: Int?) -> Subscription {
         Subscription(id: "s\(pct ?? -1)", provider: "claude", label: "S",
@@ -133,12 +102,12 @@ final class NotchTests: XCTestCase {
     // MARK: - Render smoke test
 
     @MainActor
-    func testRendersNotchToNonEmptyPNG() throws {
+    func testRendersMenubarToNonEmptyPNG() throws {
         let out = FileManager.default.temporaryDirectory
-            .appendingPathComponent("adash-hud-notch-test-\(UUID().uuidString).png")
+            .appendingPathComponent("adash-hud-menubar-test-\(UUID().uuidString).png")
         defer { try? FileManager.default.removeItem(at: out) }
 
-        try PreviewRenderer.renderNotchPNG(to: out, scale: 2)
+        try PreviewRenderer.renderMenubarPNG(to: out, scale: 2)
 
         let data = try Data(contentsOf: out)
         XCTAssertGreaterThan(data.count, 2000, "rendered PNG suspiciously small")

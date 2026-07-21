@@ -2,24 +2,19 @@ import AppKit
 import SwiftUI
 import HUDCore
 
-/// Wires the two faces of the HUD to one store. In menubar mode an
-/// NSStatusItem hosts the mini ring clusters and clicking it opens the card
-/// panel. In notch mode (built-in display is the sole display and has a
-/// notch) the status item hides and a NotchController draws the pill over the
-/// camera housing instead, expanding to the same card on hover. The mode is
-/// re-decided from ModePolicy on every display-configuration change, and the
-/// notch window is rebuilt rather than moved.
+/// Wires the HUD to one store as a plain menu-bar app. An NSStatusItem hosts the
+/// glance (one colored dot per running agent, spinning while it works, plus a
+/// single ring for the tightest quota). Left-click opens the full card panel
+/// below it; right-click offers Quit (there's no dock icon or app menu).
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
     private let store = HUDStore()
     private var statusItem: NSStatusItem!
     private var panel: NSPanel?
     private var hostingView: NSHostingView<AnyView>!
-    private var notchController: NotchController!
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         store.start()
-        notchController = NotchController(store: store)
 
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
 
@@ -38,45 +33,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             ])
             button.target = self
             button.action = #selector(togglePanel)
-            // Left-click toggles the card; right-click offers Quit (this app has
-            // no dock icon or menu bar of its own).
+            // Left-click toggles the card; right-click offers Quit.
             button.sendAction(on: [.leftMouseUp, .rightMouseUp])
         }
-
-        NotificationCenter.default.addObserver(
-            self,
-            selector: #selector(displaysChanged),
-            name: NSApplication.didChangeScreenParametersNotification,
-            object: nil
-        )
-        applyMode()
     }
 
     func applicationWillTerminate(_ notification: Notification) {
         store.stop()
-        notchController.hide()
     }
 
-    // MARK: - Mode switching
-
-    @objc private func displaysChanged() {
-        applyMode()
-    }
-
-    private func applyMode() {
-        let displays = NSScreen.screens.map(\.displayInfo)
-        let mode = ModePolicy.mode(for: displays)
-        if mode == .notch, let builtIn = NSScreen.screens.first(where: \.isBuiltIn) {
-            statusItem.isVisible = false
-            panel?.orderOut(nil)
-            notchController.show(on: builtIn)
-        } else {
-            notchController.hide()
-            statusItem.isVisible = true
-        }
-    }
-
-    // MARK: - Menubar card panel
+    // MARK: - Status item interaction
 
     @objc private func togglePanel() {
         if NSApp.currentEvent?.type == .rightMouseUp {
@@ -109,6 +75,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     @objc private func quitApp() {
         AppActions.quit()
     }
+
+    // MARK: - Card panel
 
     private func showPanel() {
         let card = CardHost().environmentObject(store)

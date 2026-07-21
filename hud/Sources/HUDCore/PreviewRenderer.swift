@@ -31,22 +31,30 @@ public enum PreviewRenderer {
         return try write(content, to: url, scale: scale, opaque: true)
     }
 
-    /// Renders the notch face over a desktop-gray backdrop, collapsed and
-    /// expanded stacked in one image, so reviewers see both hover states of
-    /// the notch pill without a notched Mac.
+    /// Renders the menu-bar glance (status-item content) beside its dropdown
+    /// card over a desktop-gray backdrop, so reviewers see both the collapsed
+    /// glance and the click-through card in one image.
     @discardableResult
-    public static func renderNotchPNG(
+    public static func renderMenubarPNG(
         snapshot: HUDSnapshot = .sample,
         now: Date = HUDSnapshot.previewNow,
         to url: URL,
         scale: CGFloat = 2
     ) throws -> URL {
-        let content = VStack(alignment: .center, spacing: 40) {
-            NotchFaceView(snapshot: snapshot, now: now)
-            NotchExpandedView(snapshot: snapshot, now: now)
+        let content = VStack(alignment: .trailing, spacing: 24) {
+            // The glance on a dark menu-bar strip, right-aligned like the real
+            // status area.
+            HStack {
+                Spacer()
+                MenuBarContentView(snapshot: snapshot, now: now)
+            }
+            .padding(.horizontal, 12)
+            .frame(height: 28)
+            .background(Color(hex: 0x26272C)) // --color-menubar from the artboards
+
+            PopoverCard(snapshot: snapshot, now: now)
         }
-        .padding(.horizontal, 60)
-        .padding(.bottom, 40)
+        .padding(40)
         .background(Color(hex: 0x1C1D21)) // --color-desktop from the artboards
 
         return try write(content, to: url, scale: scale, opaque: true)
