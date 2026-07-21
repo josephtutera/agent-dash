@@ -51,22 +51,31 @@ enum DaemonLauncher {
         return ok
     }
 
-    /// Walk up from the executable looking for a directory that has both
-    /// `main.py` and `.venv/bin/python`. That's the repo/worktree root when the
-    /// binary lives at `<root>/hud/.build/<config>/adash-hud`.
+    /// Find the daemon's `main.py` + `.venv/bin/python`. First walk up from the
+    /// executable (the dev case: binary at `<root>/hud/.build/<config>/adash-hud`);
+    /// then fall back to the ADDaemonRoot path build-app.sh baked into Info.plist,
+    /// so an installed copy in /Applications still finds the repo it came from.
     static func resolvePaths() -> (python: URL, mainPy: URL)? {
         let exe = (Bundle.main.executableURL
             ?? URL(fileURLWithPath: CommandLine.arguments.first ?? "")).resolvingSymlinksInPath()
         var dir = exe.deletingLastPathComponent()
         for _ in 0..<6 {
-            let mainPy = dir.appendingPathComponent("main.py")
-            let python = dir.appendingPathComponent(".venv/bin/python")
-            if FileManager.default.fileExists(atPath: mainPy.path),
-               FileManager.default.fileExists(atPath: python.path) {
-                return (python, mainPy)
-            }
+            if let found = daemonPaths(in: dir) { return found }
             dir = dir.deletingLastPathComponent()
         }
+        if let root = Bundle.main.object(forInfoDictionaryKey: "ADDaemonRoot") as? String,
+           !root.isEmpty,
+           let found = daemonPaths(in: URL(fileURLWithPath: root)) {
+            return found
+        }
         return nil
+    }
+
+    private static func daemonPaths(in dir: URL) -> (python: URL, mainPy: URL)? {
+        let mainPy = dir.appendingPathComponent("main.py")
+        let python = dir.appendingPathComponent(".venv/bin/python")
+        guard FileManager.default.fileExists(atPath: mainPy.path),
+              FileManager.default.fileExists(atPath: python.path) else { return nil }
+        return (python, mainPy)
     }
 }
