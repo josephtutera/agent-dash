@@ -33,17 +33,28 @@ class Session:
         return Path(self.project_dir).name if self.project_dir else "?"
 
 
-def resume_command(session: Session) -> str:
-    """Shell command that resumes the session in its project directory."""
-    tool_cmd = {
+def resume_invocation(session: Session) -> str:
+    """The tool's own resume command, e.g. 'claude --resume abc', with no
+    directory change — the caller sets the working directory separately (a Warp
+    tab sets it via its `directory` field)."""
+    return {
         "claude": f"claude --resume {shlex.quote(session.id)}",
         "codex": f"codex resume {shlex.quote(session.id)}",
         "opencode": f"opencode --session {shlex.quote(session.id)}",
     }[session.tool]
+
+
+def resume_directory(session: Session) -> str:
+    """The session's project directory, falling back to home when it's gone."""
     directory = session.project_dir
     if not directory or not Path(directory).is_dir():
         directory = str(Path.home())
-    return f"cd {shlex.quote(directory)} && {tool_cmd}"
+    return directory
+
+
+def resume_command(session: Session) -> str:
+    """Shell command that resumes the session in its project directory."""
+    return f"cd {shlex.quote(resume_directory(session))} && {resume_invocation(session)}"
 
 
 def rel_time(dt: datetime) -> str:

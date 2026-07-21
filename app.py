@@ -21,7 +21,7 @@ from textual.widgets import DataTable, Footer, Input, Static
 from activity import enrich
 from agents import RunningAgent, running_agents
 from collectors import collect_all
-from models import TOOL_COLORS, Session, fmt_tokens, rel_time, resume_command
+from models import TOOL_COLORS, Session, fmt_tokens, rel_time, resume_directory, resume_invocation
 from usage import ToolUsage, UsageWindow, claude_profiles, collect_usage
 
 BAR_WIDTH = 24
@@ -265,13 +265,15 @@ def _dir_slug(cwd: str) -> str:
     return re.sub(r"[^A-Za-z0-9]+", "-", name).strip("-").lower() or "root"
 
 
-def _write_tab_config(tool: str, cwd: str, configs_dir: Path, suffix: str = "", env: dict | None = None) -> str:
+def _write_tab_config(tool: str, cwd: str, configs_dir: Path, suffix: str = "", env: dict | None = None, command: str | None = None) -> str:
     """Generate (or refresh) a tab config that opens `tool` in `cwd`; return its stem.
 
     `suffix` distinguishes tabs launched in different directories (e.g. opening
     claude in several repos at once). `env` prepends VAR=value assignments to the
     command (used to point claude at a non-default CLAUDE_CONFIG_DIR account).
-    When the tool has no command (terminal), the tab opens a bare shell.
+    `command` overrides the default tool command — used to resume a specific
+    session (e.g. `claude --resume <id>`) rather than start a fresh one. When the
+    tool has no command (terminal) and no override, the tab opens a bare shell.
     """
     stem = f"agentdash-{tool}" + (f"-{suffix}" if suffix else "")
     label = "terminal" if tool == "terminal" else tool
@@ -284,7 +286,7 @@ def _write_tab_config(tool: str, cwd: str, configs_dir: Path, suffix: str = "", 
         'type = "terminal"',
         f'directory = "{cwd}"',
     ]
-    command = _TAB_COMMANDS[tool]
+    command = command if command is not None else _TAB_COMMANDS[tool]
     if command:
         prefix = "".join(f"{k}={v} " for k, v in (env or {}).items())
         lines.append(f'commands = ["{prefix}{command}"]')
@@ -981,10 +983,15 @@ class AdashApp(App):
             return
         row = min(table.cursor_row, len(self.filtered) - 1)
         self.selected = self.filtered[row]
-        if self.cmd_file:
-            with open(self.cmd_file, "w") as fh:
-                fh.write(resume_command(self.selected) + "\n")
-        self.exit()
+        session = self.selected
+        # Resume in a fresh Warp tab, the same way the launcher opens new
+        # sessions, so the dashboard stays up and you never lose it to the
+        # resumed session taking over this terminal.
+        cwd = resume_directory(session)
+        if self._open_tab(session.tool, cwd,
+                          suffix=f"resume-{session.id[:8]}",
+                          command=resume_invocation(session)):
+            self.notify(f"resuming {session.tool} in {Path(cwd).name or cwd}", timeout=2)
 
     def _recent_dirs(self, limit: int = 8) -> list[tuple[str, int, datetime | None]]:
         """Recent working directories from session history, most-recent first,
@@ -1041,9 +1048,9 @@ class AdashApp(App):
             self.notify(f"opening {tool}{plan} in {where}", timeout=2)
         self._render_picker()  # footer echoes what has been opened
 
-    def _open_tab(self, tool: str, cwd: str, suffix: str = "", env: dict | None = None) -> bool:
+    def _open_tab(self, tool: str, cwd: str, suffix: str = "", env: dict | None = None, command: str | None = None) -> bool:
         try:
-            stem = _write_tab_config(tool, cwd, _warp_configs_dir(), suffix=suffix, env=env)
+            stem = _write_tab_config(tool, cwd, _warp_configs_dir(), suffix=suffix, env=env, command=command)
             Popen(["open", f"warp://tab_config/{stem}"], stdout=DEVNULL, stderr=DEVNULL)
             return True
         except OSError as exc:
