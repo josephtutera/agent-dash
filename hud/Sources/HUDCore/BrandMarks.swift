@@ -1,7 +1,12 @@
 import SwiftUI
+#if canImport(AppKit)
+import AppKit
+#endif
 
-// Both brand marks are drawn from scratch in SwiftUI, no bitmaps, so they stay
-// crisp at any scale and pick up the theme tint.
+// The Claude spark is drawn from scratch in SwiftUI so it stays crisp at any
+// scale; the OpenAI mark is the real logo (an embedded template image). Both
+// are tintable so they render in the card's brand colors or, in the menu bar,
+// in a single monochrome tint that AppKit re-colors for guaranteed contrast.
 
 /// The Claude "spark": twelve short lines radiating from the center at 30°
 /// steps, round-capped, in coral.
@@ -36,9 +41,10 @@ public struct ClaudeSpark: View {
     }
 }
 
-/// The OpenAI/Codex "knot": six rounded-rect arms placed 60° apart, each offset
-/// out from the center, in white.
-public struct OpenAIKnot: View {
+/// The OpenAI/Codex mark: the real interwoven "blossom" logo, drawn as a SwiftUI
+/// template image so `color` fully determines its fill (white on the card, or a
+/// monochrome tint in the menu bar). Decoded once from the embedded asset.
+public struct OpenAIMark: View {
     public var size: CGFloat = 13
     public var color: Color = .white
     public init(size: CGFloat = 13, color: Color = .white) {
@@ -47,46 +53,48 @@ public struct OpenAIKnot: View {
     }
 
     public var body: some View {
-        Canvas { context, canvasSize in
-            let center = CGPoint(x: canvasSize.width / 2, y: canvasSize.height / 2)
-            let radius = min(canvasSize.width, canvasSize.height) / 2
-            let armLength = radius * 1.15
-            let armWidth = radius * 0.42
-            let offset = radius * 0.30
-            for i in 0..<6 {
-                let angle = Double(i) * (.pi / 3.0) // 60 degrees
-                var arm = Path(
-                    roundedRect: CGRect(
-                        x: -armWidth / 2,
-                        y: -armLength / 2 + offset,
-                        width: armWidth,
-                        height: armLength
-                    ),
-                    cornerRadius: armWidth / 2
-                )
-                let transform = CGAffineTransform(translationX: center.x, y: center.y)
-                    .rotated(by: angle)
-                arm = arm.applying(transform)
-                context.fill(arm, with: .color(color))
-            }
-        }
-        .frame(width: size, height: size)
+        #if canImport(AppKit)
+        Image(nsImage: Self.templateImage)
+            .resizable()
+            .renderingMode(.template)
+            .interpolation(.high)
+            .aspectRatio(contentMode: .fit)
+            .foregroundStyle(color)
+            .frame(width: size, height: size)
+        #else
+        Color.clear.frame(width: size, height: size)
+        #endif
     }
+
+    #if canImport(AppKit)
+    /// The embedded PNG mask, decoded once and flagged as a template so it takes
+    /// the foreground tint (and AppKit's menu-bar tint) rather than its own pixels.
+    static let templateImage: NSImage = {
+        let data = Data(base64Encoded: OpenAIMarkAsset.pngBase64, options: .ignoreUnknownCharacters) ?? Data()
+        let image = NSImage(data: data) ?? NSImage(size: NSSize(width: 1, height: 1))
+        image.isTemplate = true
+        return image
+    }()
+    #endif
 }
 
-/// Chooses the right mark for a provider.
+/// Chooses the right mark for a provider. `tint` overrides the brand color with
+/// a single monochrome color (used by the menu-bar glance, which AppKit then
+/// re-tints for contrast); when nil each provider draws in its own brand color.
 public struct BrandMark: View {
     public let provider: String
     public var size: CGFloat = 13
-    public init(provider: String, size: CGFloat = 13) {
+    public var tint: Color?
+    public init(provider: String, size: CGFloat = 13, tint: Color? = nil) {
         self.provider = provider
         self.size = size
+        self.tint = tint
     }
     public var body: some View {
         if provider == "codex" {
-            OpenAIKnot(size: size)
+            OpenAIMark(size: size, color: tint ?? .white)
         } else {
-            ClaudeSpark(size: size)
+            ClaudeSpark(size: size, color: tint ?? Theme.claudeCoral)
         }
     }
 }

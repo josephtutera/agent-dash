@@ -1,4 +1,7 @@
 import XCTest
+#if canImport(AppKit)
+import AppKit
+#endif
 @testable import HUDCore
 
 /// The ring derivations feeding the cluster views, the per-agent color
@@ -113,4 +116,20 @@ final class HUDViewTests: XCTestCase {
         XCTAssertGreaterThan(data.count, 2000, "rendered PNG suspiciously small")
         XCTAssertEqual(Array(data.prefix(4)), [0x89, 0x50, 0x4E, 0x47])
     }
+
+    // MARK: - Embedded OpenAI mark
+
+    #if canImport(AppKit)
+    func testOpenAIMarkAssetDecodesToTemplateImage() {
+        let data = Data(base64Encoded: OpenAIMarkAsset.pngBase64, options: .ignoreUnknownCharacters)
+        XCTAssertNotNil(data, "embedded OpenAI mark base64 must decode")
+        XCTAssertGreaterThan(data?.count ?? 0, 500, "decoded PNG suspiciously small")
+        XCTAssertEqual(Array(data!.prefix(4)), [0x89, 0x50, 0x4E, 0x47], "not a PNG")
+
+        let image = OpenAIMark.templateImage
+        XCTAssertTrue(image.isTemplate, "mark must be a template so it takes the tint")
+        XCTAssertGreaterThan(image.size.width, 0)
+        XCTAssertGreaterThan(image.size.height, 0)
+    }
+    #endif
 }

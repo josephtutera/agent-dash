@@ -46,7 +46,8 @@ public enum PreviewRenderer {
             // status area.
             HStack {
                 Spacer()
-                MenuBarContentView(snapshot: snapshot, now: now)
+                // White mimics AppKit's template tint on a dark menu bar.
+                MenuBarContentView(snapshot: snapshot, now: now, tint: .white)
             }
             .padding(.horizontal, 12)
             .frame(height: 28)

@@ -10,16 +10,22 @@ public struct RingCluster: View {
     public let rings: [Window?]
     public var diameter: CGFloat = 18
     public var strokeWidth: CGFloat = 2
+    /// When set, the cluster renders monochrome in this single color (faint
+    /// track, solid fill) instead of the severity palette — for the menu-bar
+    /// glance, which AppKit re-tints for contrast. Fill level still shows how
+    /// spent a limit is; the color-coded severity lives in the full card.
+    public var tint: Color?
 
-    public init(rings: [Window?], diameter: CGFloat = 18, strokeWidth: CGFloat = 2) {
+    public init(rings: [Window?], diameter: CGFloat = 18, strokeWidth: CGFloat = 2, tint: Color? = nil) {
         self.rings = rings
         self.diameter = diameter
         self.strokeWidth = strokeWidth
+        self.tint = tint
     }
 
     /// The original two-ring form used by the menubar mini and offline states.
-    public init(session: Window?, weekly: Window?, diameter: CGFloat = 18, strokeWidth: CGFloat = 2) {
-        self.init(rings: [session, weekly], diameter: diameter, strokeWidth: strokeWidth)
+    public init(session: Window?, weekly: Window?, diameter: CGFloat = 18, strokeWidth: CGFloat = 2, tint: Color? = nil) {
+        self.init(rings: [session, weekly], diameter: diameter, strokeWidth: strokeWidth, tint: tint)
     }
 
     public var body: some View {
@@ -41,14 +47,15 @@ public struct RingCluster: View {
     @ViewBuilder
     private func ring(for window: Window?, inset: CGFloat) -> some View {
         let fraction = Fmt.consumed(pctLeft: window?.pctLeft)
-        let color = Theme.severity(pctLeft: window?.pctLeft)
+        let trackColor = tint.map { $0.opacity(0.32) } ?? Theme.hairline
+        let fillColor = tint ?? Theme.severity(pctLeft: window?.pctLeft)
         ZStack {
             Circle()
-                .stroke(Theme.hairline, lineWidth: strokeWidth)
+                .stroke(trackColor, lineWidth: strokeWidth)
             Circle()
                 .trim(from: 0, to: max(0, min(1, fraction)))
                 .stroke(
-                    color,
+                    fillColor,
                     style: StrokeStyle(lineWidth: strokeWidth, lineCap: .round)
                 )
                 .rotationEffect(.degrees(-90))
@@ -66,10 +73,16 @@ public struct RingCluster: View {
 public struct MenuBarContentView: View {
     public let snapshot: HUDSnapshot?
     public var now: Date
+    /// The single monochrome color the whole glance draws in. The live status
+    /// item renders this to a *template* image (so AppKit tints it for contrast
+    /// over any wallpaper); the headless preview passes white to mimic that
+    /// result on a dark strip.
+    public var tint: Color
 
-    public init(snapshot: HUDSnapshot?, now: Date = Date()) {
+    public init(snapshot: HUDSnapshot?, now: Date = Date(), tint: Color = .primary) {
         self.snapshot = snapshot
         self.now = now
+        self.tint = tint
     }
 
     // Fixed presentation order regardless of daemon ordering.
@@ -85,13 +98,13 @@ public struct MenuBarContentView: View {
             if !orderedSubs.isEmpty {
                 ForEach(orderedSubs) { sub in
                     HStack(spacing: 4) {
-                        BrandMark(provider: sub.provider, size: 12)
-                        RingCluster(rings: sub.miniRings, diameter: 18, strokeWidth: 2)
+                        BrandMark(provider: sub.provider, size: 12, tint: tint)
+                        RingCluster(rings: sub.miniRings, diameter: 18, strokeWidth: 2, tint: tint)
                     }
                 }
             } else {
                 ForEach(0..<3, id: \.self) { _ in
-                    RingCluster(session: nil, weekly: nil, diameter: 18).opacity(0.35)
+                    RingCluster(session: nil, weekly: nil, diameter: 18, tint: tint).opacity(0.35)
                 }
             }
         }
