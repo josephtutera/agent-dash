@@ -1782,3 +1782,51 @@ def test_snapshot_file_is_present_and_parseable():
     assert "claude-opus-4-8" in snap and "gpt-5.6" in snap
     rates = pricing._rates_from_entry(snap["claude-opus-4-8"])
     assert rates is not None and rates.input > 0
+
+
+def test_hud_value_is_json_safe_and_matches_contract():
+    """The daemon consumes hud_value(); it must be plain json.dumps-able and carry
+    exactly the contract keys (no set, no datetime leaking through)."""
+    report = pricing.ValueReport(
+        subs=[
+            pricing.SubValue(id="claude-team", today_usd=8.334, month_usd=15209.651,
+                             subs_cost_usd=150.0, multiple=101.4),
+            pricing.SubValue(id="codex", today_usd=0.0, month_usd=3774.544),
+        ],
+        today_total_usd=8.334,
+        month_total_usd=18984.201,
+        subs_cost_usd=150.0,
+        multiple=126.561,
+        skipped_models={"<synthetic>"},  # a set: plain json.dumps would reject the raw report
+        generated_at=datetime(2026, 7, 21, 15, 0, tzinfo=timezone.utc),  # a datetime: likewise
+    )
+    hud = pricing.hud_value(report)
+
+    # serializes with the stdlib encoder, no custom default= needed
+    encoded = json.dumps(hud)
+    assert isinstance(encoded, str)
+
+    # exactly the contract keys at the top level
+    assert set(hud.keys()) == {"today_usd", "month_usd", "subs_cost_usd", "multiple", "by_sub"}
+    # dropped: the CLI-only fields never reach the daemon
+    assert "skipped_models" not in hud and "generated_at" not in hud
+
+    # dollars rounded to cents
+    assert hud["today_usd"] == 8.33 and hud["month_usd"] == 18984.2
+    assert hud["subs_cost_usd"] == 150.0
+
+    # by_sub keyed by subscription id, each with exactly today/month
+    assert set(hud["by_sub"].keys()) == {"claude-team", "codex"}
+    assert hud["by_sub"]["claude-team"] == {"today_usd": 8.33, "month_usd": 15209.65}
+    assert set(hud["by_sub"]["codex"].keys()) == {"today_usd", "month_usd"}
+
+
+def test_hud_value_carries_none_cost_and_multiple_through():
+    report = pricing.ValueReport(
+        subs=[pricing.SubValue(id="codex", today_usd=1.0, month_usd=2.0)],
+        today_total_usd=1.0, month_total_usd=2.0,
+        subs_cost_usd=None, multiple=None,
+    )
+    hud = pricing.hud_value(report)
+    assert hud["subs_cost_usd"] is None and hud["multiple"] is None
+    json.dumps(hud)  # None is JSON-safe

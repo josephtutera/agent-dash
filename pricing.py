@@ -616,3 +616,35 @@ def collect_value(
         skipped_models=set(resolver.skipped),
         generated_at=now,
     )
+
+
+def _round2(value: float | None) -> float | None:
+    return round(value, 2) if value is not None else None
+
+
+def hud_value(report: ValueReport | None = None) -> dict | None:
+    """The daemon-facing HUD contract: a JSON-safe dict of plain primitives.
+
+    ValueReport itself carries a set (skipped_models) and a datetime
+    (generated_at) for the CLI, and plain json.dumps chokes on both. The HUD
+    daemon and the Swift app consume this flattened shape instead, so this is the
+    one public surface they depend on. Every value here is a float, a str, or
+    None; dollars are rounded to cents. Keys are exactly:
+
+        today_usd, month_usd, subs_cost_usd, multiple,
+        by_sub -> {<sub id>: {today_usd, month_usd}}
+
+    Passing `report=None` builds a fresh report via collect_value().
+    """
+    if report is None:
+        report = collect_value()
+    return {
+        "today_usd": _round2(report.today_total_usd),
+        "month_usd": _round2(report.month_total_usd),
+        "subs_cost_usd": _round2(report.subs_cost_usd),
+        "multiple": _round2(report.multiple),
+        "by_sub": {
+            sub.id: {"today_usd": _round2(sub.today_usd), "month_usd": _round2(sub.month_usd)}
+            for sub in report.subs
+        },
+    }
