@@ -40,7 +40,8 @@ def main() -> None:
     parser.add_argument("--dump", action="store_true", help="print sessions as text and exit (no TUI)")
     parser.add_argument("--usage", action="store_true", help="print subscription usage and exit (no TUI)")
     parser.add_argument("--serve", action="store_true", help="run the resident HUD snapshot daemon")
-    parser.add_argument("--host", default="127.0.0.1", help="serve: loopback host to bind (default 127.0.0.1)")
+    parser.add_argument("--host", default="127.0.0.1",
+                        help="serve: host to bind (default 127.0.0.1; non-loopback needs ADASH_SERVE_ALLOW_REMOTE=1)")
     parser.add_argument("--port", type=int, default=8737, help="serve: port to bind (default 8737)")
     args = parser.parse_args()
 

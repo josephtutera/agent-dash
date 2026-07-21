@@ -17,6 +17,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import sys
 import threading
 from dataclasses import is_dataclass, asdict
 from datetime import datetime, timedelta, timezone
@@ -41,13 +42,20 @@ _WINDOW_SECONDS = {
     "weekly": 7 * 86400,
 }
 
-# The soft dependency: a sibling agent is building pricing.collect_value(). It may
-# not exist on this branch, so import it defensively and treat its absence as a
-# null "value" block rather than a hard failure.
+# The soft dependency: a sibling branch builds pricing. It may not exist here, so
+# import the whole module defensively and treat its absence as a null "value"
+# block. The preferred entry point is pricing.hud_value(), which returns exactly
+# the documented value contract; older builds only expose collect_value(), which
+# hands back a richer object we coerce down.
 try:
-    from pricing import collect_value as _collect_value_fn  # type: ignore
+    import pricing as _pricing  # type: ignore
 except ImportError:
-    _collect_value_fn = None
+    _pricing = None
+
+# Non-loopback binds break the "localhost only" promise (no auth, permissive
+# CORS), so they're refused unless this escape hatch is explicitly set.
+_LOOPBACK_HOSTS = {"127.0.0.1", "::1", "localhost"}
+_ALLOW_REMOTE_ENV = "ADASH_SERVE_ALLOW_REMOTE"
 
 
 # ---------------------------------------------------------------- helpers
@@ -175,8 +183,10 @@ def _agent_sub_id(agent, profiles) -> str | None:
 
 
 def _coerce_value(result) -> dict | None:
-    """pricing.collect_value() is expected to hand back a schema-shaped dict;
-    tolerate a dataclass too. Anything else (or None) becomes a null value block."""
+    """Fallback coercion for pricing.collect_value(): a schema-shaped dict passes
+    through, a dataclass is unwrapped, anything else (or None) becomes null. This
+    is best-effort only; the raw collect_value object can carry non-JSON types
+    (sets, datetimes), which is exactly why _validate_json guards the result."""
     if result is None:
         return None
     if isinstance(result, dict):
@@ -186,13 +196,38 @@ def _coerce_value(result) -> dict | None:
     return None
 
 
-def _collect_value() -> dict | None:
-    if _collect_value_fn is None:
+def _validate_json(value) -> dict | None:
+    """Guarantee the value block can be serialized before it reaches the snapshot.
+    A pricing object that isn't pure JSON (a set, a datetime) would otherwise
+    crash json.dump when the snapshot is written, taking the daemon down. Degrade
+    to null with a warning instead: the value field is never worth a crash."""
+    if value is None:
         return None
     try:
-        return _coerce_value(_collect_value_fn())
+        json.dumps(value)
+    except (TypeError, ValueError) as exc:
+        print(f"adash serve: value block is not JSON-serializable ({exc}); dropping it",
+              file=sys.stderr)
+        return None
+    return value
+
+
+def _collect_value() -> dict | None:
+    """The value block, or None. Prefer pricing.hud_value() (the documented
+    contract); fall back to coercing collect_value() on older builds. Any failure,
+    including a non-serializable result, degrades to None rather than propagating."""
+    if _pricing is None:
+        return None
+    try:
+        if hasattr(_pricing, "hud_value"):
+            value = _pricing.hud_value()
+        elif hasattr(_pricing, "collect_value"):
+            value = _coerce_value(_pricing.collect_value())
+        else:
+            return None
     except Exception:
         return None
+    return _validate_json(value)
 
 
 # ---------------------------------------------------------------- snapshot
@@ -282,12 +317,16 @@ def build_snapshot(usages, fetched_at, agents, value=None, profiles=None) -> dic
 
 def write_snapshot_atomic(path: Path, snapshot: dict) -> None:
     """Write the snapshot without ever exposing a half-written file: dump to a
-    temp file in the same directory, then os.replace onto the target."""
+    temp file in the same directory, then os.replace onto the target. The temp
+    file is always cleaned up, so a serialization error can't orphan a .tmp."""
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
-    with open(tmp, "w") as fh:
-        json.dump(snapshot, fh, indent=2)
-    os.replace(tmp, path)
+    try:
+        with open(tmp, "w") as fh:
+            json.dump(snapshot, fh, indent=2)
+        os.replace(tmp, path)  # atomic rename; on success tmp no longer exists
+    finally:
+        tmp.unlink(missing_ok=True)
 
 
 def _comparable(snapshot: dict) -> dict:
@@ -411,12 +450,32 @@ def make_server(host: str, port: int, daemon: HudDaemon) -> ThreadingHTTPServer:
     return server
 
 
+def _ensure_loopback(host: str) -> None:
+    """Refuse a non-loopback bind unless explicitly overridden. The HUD API has no
+    auth and permissive CORS, so exposing it off localhost would hand every
+    subscription reading and running-agent list to the local network."""
+    if host in _LOOPBACK_HOSTS or os.environ.get(_ALLOW_REMOTE_ENV) == "1":
+        return
+    raise SystemExit(
+        f"adash serve: refusing to bind non-loopback host {host!r}. The HUD API has "
+        f"no authentication and permissive CORS, so it must stay on localhost. Set "
+        f"{_ALLOW_REMOTE_ENV}=1 to override at your own risk."
+    )
+
+
 def serve(host: str = "127.0.0.1", port: int = 8737) -> None:
     """Run the HUD daemon: start the pollers, prime the snapshot once, and serve
     it on the loopback interface until interrupted."""
+    _ensure_loopback(host)
     daemon = HudDaemon()
-    daemon.poll_usage_once()  # prime once so /v1/hud has data on the first request
-    daemon.poll_activity_once()
+    # prime once so /v1/hud has data on the first request; a failing collector must
+    # log and let startup continue rather than kill the daemon (the loop retries).
+    for prime in (daemon.poll_usage_once, daemon.poll_activity_once):
+        try:
+            prime()
+        except Exception as exc:
+            print(f"adash serve: initial poll failed ({exc}); will retry in the loop",
+                  file=sys.stderr)
     daemon.start_polling()
     server = make_server(host, port, daemon)
     print(f"adash serve: HUD snapshot on http://{host}:{port}/v1/hud (cache {daemon.cache_path})")

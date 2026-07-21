@@ -10,6 +10,7 @@ import urllib.error
 import urllib.request
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -207,26 +208,68 @@ def test_fresh_reading_is_not_flagged_stale():
 # ---------------------------------------------------------------- value
 
 
-def test_value_is_null_when_collector_absent(monkeypatch: pytest.MonkeyPatch):
-    monkeypatch.setattr(serve_module, "_collect_value_fn", None)
-    assert build_snapshot(_fake_usages(), _now(), [], value=serve_module._collect_value()) is not None
+def _fake_pricing(**attrs) -> SimpleNamespace:
+    """A stand-in for the pricing module exposing whatever entry points a test
+    wants (hud_value / collect_value)."""
+    return SimpleNamespace(**attrs)
+
+
+def test_value_is_null_when_module_absent(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setattr(serve_module, "_pricing", None)
     assert serve_module._collect_value() is None
 
 
-def test_value_passthrough_when_collector_present(monkeypatch: pytest.MonkeyPatch):
+def test_value_prefers_hud_value_adapter(monkeypatch: pytest.MonkeyPatch):
     payload = {"today_usd": 42.1, "month_usd": 830.5, "subs_cost_usd": 400.0,
                "multiple": 2.08, "by_sub": {"claude-team": {"today_usd": 30.0, "month_usd": 600.0}}}
-    monkeypatch.setattr(serve_module, "_collect_value_fn", lambda: payload)
+    # collect_value would raise: hud_value must win when both exist
+    monkeypatch.setattr(serve_module, "_pricing",
+                        _fake_pricing(hud_value=lambda: payload,
+                                      collect_value=lambda: (_ for _ in ()).throw(AssertionError)))
     snap = build_snapshot(_fake_usages(), _now(), [], value=serve_module._collect_value())
     assert snap["value"] == payload
+
+
+def test_value_falls_back_to_collect_value(monkeypatch: pytest.MonkeyPatch):
+    payload = {"today_usd": 1.0, "month_usd": 2.0, "subs_cost_usd": None,
+               "multiple": None, "by_sub": {}}
+    monkeypatch.setattr(serve_module, "_pricing", _fake_pricing(collect_value=lambda: payload))
+    assert serve_module._collect_value() == payload
 
 
 def test_value_collector_error_is_swallowed(monkeypatch: pytest.MonkeyPatch):
     def boom():
         raise RuntimeError("pricing exploded")
 
-    monkeypatch.setattr(serve_module, "_collect_value_fn", boom)
+    monkeypatch.setattr(serve_module, "_pricing", _fake_pricing(hud_value=boom))
     assert serve_module._collect_value() is None
+
+
+def test_value_with_non_json_type_degrades_to_none(monkeypatch: pytest.MonkeyPatch):
+    """A value block carrying a set (or any non-JSON type) must never crash the
+    snapshot write: it degrades to None instead of raising."""
+    bad = {"today_usd": 1.0, "by_sub": {"claude-team"}}  # a set is not JSON-serializable
+    monkeypatch.setattr(serve_module, "_pricing", _fake_pricing(hud_value=lambda: bad))
+    assert serve_module._collect_value() is None
+    # and the snapshot around it still serializes cleanly
+    snap = build_snapshot(_fake_usages(), _now(), [], value=serve_module._collect_value())
+    assert snap["value"] is None
+    json.dumps(snap)  # must not raise
+
+
+def test_pricing_hud_value_contract_is_serializable(monkeypatch: pytest.MonkeyPatch):
+    """Cross-contract seam: once the pricing branch lands, run a real ValueReport
+    through the value path and assert the snapshot serializes and the value keys
+    match docs/hud-schema.md. Skips while pricing is absent on this branch."""
+    pricing = pytest.importorskip("pricing")
+    if not hasattr(pricing, "hud_value"):
+        pytest.skip("pricing.hud_value adapter not present yet")
+
+    value = serve_module._collect_value()
+    snap = build_snapshot(_fake_usages(), _now(), _fake_agents(), value=value)
+    json.dumps(snap)  # the whole snapshot must serialize with the real value block
+    if snap["value"] is not None:
+        assert set(snap["value"]) == {"today_usd", "month_usd", "subs_cost_usd", "multiple", "by_sub"}
 
 
 def test_snapshot_carries_no_credentials():
@@ -253,6 +296,15 @@ def test_write_snapshot_atomic_replaces_existing(tmp_path: Path):
     write_snapshot_atomic(path, {"version": 1, "n": 1})
     write_snapshot_atomic(path, {"version": 1, "n": 2})
     assert json.loads(path.read_text())["n"] == 2
+
+
+def test_write_snapshot_atomic_leaves_no_temp_on_serialization_error(tmp_path: Path):
+    """A non-serializable snapshot must not orphan a .tmp file."""
+    path = tmp_path / "hud.json"
+    with pytest.raises(TypeError):
+        write_snapshot_atomic(path, {"bad": {1, 2, 3}})  # a set can't be dumped
+    assert list(tmp_path.glob(".*.tmp")) == []
+    assert not path.exists()  # nothing half-written landed at the target
 
 
 def test_daemon_writes_file_only_on_content_change(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
@@ -322,3 +374,24 @@ def test_unknown_path_404s(running_server: str):
     with pytest.raises(urllib.error.HTTPError) as exc:
         urllib.request.urlopen(f"{running_server}/v1/nope", timeout=5)
     assert exc.value.code == 404
+
+
+# ---------------------------------------------------------------- loopback guard
+
+
+def test_loopback_hosts_are_allowed(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.delenv(serve_module._ALLOW_REMOTE_ENV, raising=False)
+    for host in ("127.0.0.1", "::1", "localhost"):
+        serve_module._ensure_loopback(host)  # must not raise
+
+
+def test_non_loopback_bind_is_refused(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.delenv(serve_module._ALLOW_REMOTE_ENV, raising=False)
+    with pytest.raises(SystemExit) as exc:
+        serve_module._ensure_loopback("0.0.0.0")
+    assert serve_module._ALLOW_REMOTE_ENV in str(exc.value)  # the message names the escape hatch
+
+
+def test_non_loopback_bind_allowed_with_env_override(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setenv(serve_module._ALLOW_REMOTE_ENV, "1")
+    serve_module._ensure_loopback("0.0.0.0")  # must not raise

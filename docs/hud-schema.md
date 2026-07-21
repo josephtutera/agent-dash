@@ -13,6 +13,9 @@ not be renamed.
 - Any other path returns `404`.
 - The server binds loopback only (default `127.0.0.1:8737`). CORS is permissive
   (`Access-Control-Allow-Origin: *`) because only localhost can reach it anyway.
+- Because the API has no authentication, a non-loopback `--host` (anything other
+  than `127.0.0.1`, `::1`, or `localhost`) is refused with a clear error. Set the
+  environment variable `ADASH_SERVE_ALLOW_REMOTE=1` to override at your own risk.
 - No credentials, tokens, or file paths beyond the agent working directory ever
   appear in the snapshot.
 
@@ -135,9 +138,12 @@ dry (safe), negative means you would run out first at the current pace.
 }
 ```
 
-`null` as a whole when the pricing collector (`pricing.collect_value`) is not
-present on this build. When present, it estimates the API-equivalent dollar value
-of the work done today and this month, the flat monthly subscription cost
+`null` as a whole when the pricing module is not present on this build, or when
+its output cannot be JSON-serialized (the daemon validates the block and drops it
+rather than crash). When present, the daemon prefers `pricing.hud_value()`, which
+returns exactly this contract; older builds exposing only `collect_value()` are
+coerced down to it. The block estimates the API-equivalent dollar value of the
+work done today and this month, the flat monthly subscription cost
 (`subs_cost_usd`, may be `null`), the value-to-cost `multiple` (may be `null`),
 and a per-subscription breakdown keyed by subscription id.
 
