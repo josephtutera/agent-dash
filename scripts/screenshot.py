@@ -67,7 +67,7 @@ def _demo_running() -> list[RunningAgent]:
 
 async def main() -> None:
     app_module.collect_all = lambda limit=300: _demo_sessions()
-    app_module.collect_usage = lambda active_claude=None: _demo_usage()
+    app_module.collect_usage = lambda active_claude=None, force=False: _demo_usage()
     app_module.running_agents = lambda: _demo_running()
     app_module.enrich = lambda agents: agents  # demo agents arrive pre-enriched
 

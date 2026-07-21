@@ -152,9 +152,15 @@ def _parse_claude_file(path: Path) -> Session | None:
         return None
     last = datetime.fromtimestamp(path.stat().st_mtime, tz=timezone.utc)
     if not title:
-        title = command
-    if not title:
-        title = clean_title(first_prompt) if first_prompt else "(untitled)"
+        # a bare command like "/model" says nothing about which session this is,
+        # so a real prompt typed afterwards wins. a command *with* args already
+        # describes the work ("/review 412"), so that keeps precedence.
+        if command and (not first_prompt or " " in command):
+            title = command
+        elif first_prompt:
+            title = clean_title(first_prompt)
+        else:
+            title = command or "(untitled)"
     return Session(
         tool="claude",
         id=session_id,

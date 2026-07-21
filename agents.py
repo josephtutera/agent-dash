@@ -30,6 +30,7 @@ class RunningAgent:
     elapsed: str  # friendly: "4h 12m"
     cwd: str
     title: str = ""  # resolved later from the session list
+    session_id: str = ""  # exact transcript id when the tool exposes one
     # live activity, filled in by activity.enrich (defaults = not-yet-known)
     state: str = "unknown"  # "working" | "idle" | "waiting" | "unknown"
     label: str = ""  # current action, e.g. "running command"

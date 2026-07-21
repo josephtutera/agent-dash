@@ -15,14 +15,20 @@ import json
 import sqlite3
 import subprocess
 import time
+import urllib.error
 import urllib.request
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from pathlib import Path
 
 from collectors import _parse_ts
 
+# The usage endpoint rate-limits per account, and every Claude Code session
+# polls it too, so the dashboard has to be a light touch: reuse a recent
+# reading instead of re-asking, and back off hard once we're told to.
 USAGE_CACHE_TTL_SECONDS = 120
+RATE_LIMIT_BACKOFF_START = 120.0  # first cooldown after a 429
+RATE_LIMIT_BACKOFF_MAX = 900.0  # doubles per repeat 429, capped at 15 minutes
 
 
 @dataclass
@@ -46,6 +52,9 @@ class ToolUsage:
     spend: float | None = None
     spend_sessions: int | None = None
     spend_days: int = 7
+    # set when the bars come from cache rather than a live call (e.g. we're in a
+    # rate-limit cooldown); the renderer shows it next to the bars.
+    stale: str = ""
 
 
 # ---------------------------------------------------------------- claude
@@ -178,6 +187,56 @@ def _parse_claude_usage(payload: dict) -> list[UsageWindow]:
     return windows
 
 
+class RateLimited(Exception):
+    """The usage endpoint returned 429. `retry_after` is its own advice in
+    seconds when it sent a Retry-After header, else None."""
+
+    def __init__(self, retry_after: float | None = None):
+        super().__init__("rate limited")
+        self.retry_after = retry_after
+
+
+@dataclass
+class _ProfileCache:
+    """Per-account fetch state: the last good reading and any active cooldown."""
+
+    usage: ToolUsage | None = None
+    fetched_at: float = 0.0  # time.monotonic() of that reading
+    cooldown_until: float = 0.0  # don't call the endpoint again before this
+    backoff: float = 0.0  # current 429 penalty, doubles per repeat
+
+
+_claude_cache: dict[str, _ProfileCache] = {}
+
+
+def _retry_after_seconds(headers) -> float | None:
+    """Retry-After as seconds. The endpoint doesn't send one today, but honor
+    it if that changes; an HTTP-date form is ignored in favor of our backoff."""
+    try:
+        return max(0.0, float(headers.get("Retry-After")))
+    except (AttributeError, TypeError, ValueError):
+        return None
+
+
+def _short_delay(seconds: float) -> str:
+    seconds = max(0, int(seconds))
+    return f"{seconds}s" if seconds < 60 else f"{round(seconds / 60)}m"
+
+
+def _copy(usage: ToolUsage) -> ToolUsage:
+    """Hand out a copy: callers mutate .label/.active, and the cache shouldn't see it."""
+    return replace(usage, windows=list(usage.windows))
+
+
+def _serve_cached(entry: _ProfileCache, marker: str, plan: str = "") -> ToolUsage:
+    """Last known bars flagged with why they're old; a bare note if we never
+    got a reading at all. Either way it stays inside the usage columns instead
+    of spilling a raw exception across the row."""
+    if entry.usage is not None:
+        return replace(_copy(entry.usage), stale=marker)
+    return ToolUsage(tool="claude", plan=plan, error=marker)
+
+
 def _claude_usage_from_token(token: str, plan: str) -> ToolUsage:
     req = urllib.request.Request(
         "https://api.anthropic.com/api/oauth/usage",
@@ -191,26 +250,57 @@ def _claude_usage_from_token(token: str, plan: str) -> ToolUsage:
     try:
         with urllib.request.urlopen(req, timeout=8) as resp:
             payload = json.loads(resp.read().decode())
+    except urllib.error.HTTPError as exc:
+        if exc.code == 429:
+            raise RateLimited(_retry_after_seconds(exc.headers)) from exc
+        return ToolUsage(tool="claude", plan=plan, error=str(exc)[:60])
     except Exception as exc:  # network down, token expired, etc.
         return ToolUsage(tool="claude", plan=plan, error=str(exc)[:60])
     return ToolUsage(tool="claude", plan=plan, windows=_parse_claude_usage(payload))
 
 
-def fetch_claude_usage_for(profile: ClaudeProfile) -> ToolUsage:
+def fetch_claude_usage_for(profile: ClaudeProfile, force: bool = False) -> ToolUsage:
+    """Usage for one account, served from cache when that's good enough.
+
+    `force` (the TUI's manual refresh) skips the freshness check but never the
+    429 cooldown, so holding down the refresh key can't dig the hole deeper.
+    """
+    entry = _claude_cache.setdefault(str(profile.config_dir), _ProfileCache())
+    now = time.monotonic()
+
+    if not force and entry.usage is not None and now - entry.fetched_at < USAGE_CACHE_TTL_SECONDS:
+        return _copy(entry.usage)
+    if now < entry.cooldown_until:
+        return _serve_cached(entry, f"rate limited · retry {_short_delay(entry.cooldown_until - now)}")
+
     creds = _profile_credentials(profile)
     if not creds:
         return ToolUsage(tool="claude", error="unlock Keychain or sign in to Claude Code")
-    return _claude_usage_from_token(*creds)
+
+    token, plan = creds
+    try:
+        usage = _claude_usage_from_token(token, plan)
+    except RateLimited as exc:
+        entry.backoff = min(max(entry.backoff * 2, RATE_LIMIT_BACKOFF_START), RATE_LIMIT_BACKOFF_MAX)
+        wait = exc.retry_after if exc.retry_after is not None else entry.backoff
+        entry.cooldown_until = now + wait
+        return _serve_cached(entry, f"rate limited · retry {_short_delay(wait)}", plan=plan)
+
+    if usage.error:  # transient (network, expired token): retry next poll, don't cache
+        return usage
+    entry.usage, entry.fetched_at = usage, now
+    entry.backoff, entry.cooldown_until = 0.0, 0.0
+    return _copy(usage)
 
 
-def fetch_claude_usages(active_label: str | None = None) -> list[ToolUsage]:
+def fetch_claude_usages(active_label: str | None = None, force: bool = False) -> list[ToolUsage]:
     """One ToolUsage per Claude account. `label` is set (and the active plan
     flagged) only when more than one account exists, so single-account setups
     render exactly as before."""
     profiles = claude_profiles()
     usages = []
     for profile in profiles:
-        usage = fetch_claude_usage_for(profile)
+        usage = fetch_claude_usage_for(profile, force=force)
         if len(profiles) > 1:
             usage.label = profile.label
         usages.append(usage)
@@ -324,6 +414,6 @@ def fetch_opencode_usage(db_path: Path | None = None) -> ToolUsage:
 # ---------------------------------------------------------------- combined
 
 
-def collect_usage(active_claude: str | None = None) -> tuple[list[ToolUsage], datetime]:
-    usages = [*fetch_claude_usages(active_claude), fetch_codex_usage(), fetch_opencode_usage()]
+def collect_usage(active_claude: str | None = None, force: bool = False) -> tuple[list[ToolUsage], datetime]:
+    usages = [*fetch_claude_usages(active_claude, force=force), fetch_codex_usage(), fetch_opencode_usage()]
     return usages, datetime.now(timezone.utc)
