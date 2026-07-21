@@ -62,6 +62,7 @@ def _elapsed(etime: str) -> str:
 
 def _parse_ps(output: str) -> list[RunningAgent]:
     agents = []
+    codex_ttys: set[str] = set()
     for line in output.splitlines():
         parts = line.split(None, 3)
         if len(parts) < 4:
@@ -71,9 +72,16 @@ def _parse_ps(output: str) -> list[RunningAgent]:
             continue
         for tool, pattern in _TOOL_PATTERNS.items():
             if pattern.search(cmdline):
+                # The Codex CLI is a Node wrapper around a native binary. Both
+                # processes share the terminal, but represent one interactive
+                # session. `ps ax` is PID ordered, so the wrapper arrives first.
+                if tool == "codex" and tty in codex_ttys:
+                    break
                 agents.append(
                     RunningAgent(tool=tool, pid=int(pid), tty=tty, elapsed=_elapsed(etime), cwd="")
                 )
+                if tool == "codex":
+                    codex_ttys.add(tty)
                 break
     return agents
 

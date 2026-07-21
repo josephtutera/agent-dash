@@ -123,6 +123,28 @@ def test_codex_collector_merges_and_filters(codex_root: Path):
     assert s.first_prompt == "fix the bug"
 
 
+def test_codex_collector_titles_current_user_message_events(tmp_path: Path):
+    """Codex 0.145 writes the typed prompt in event_msg, not response_item."""
+    root = tmp_path / "codex"
+    sid = "aaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+    _write_jsonl(
+        root / "sessions" / "2026" / "07" / "21" / f"rollout-{sid}.jsonl",
+        [
+            {"type": "session_meta", "payload": {"session_id": sid, "cwd": "/tmp/cx", "thread_source": "user"}},
+            {"type": "response_item", "payload": {"type": "message", "role": "user",
+             "content": [{"type": "input_text", "text": "# AGENTS.md instructions"}]}},
+            {"type": "event_msg", "payload": {"type": "user_message",
+             "message": "[Image #1] can you figure out why codex titles are missing?"}},
+        ],
+    )
+
+    sessions = collectors.collect_codex(root=root)
+
+    assert len(sessions) == 1
+    assert sessions[0].first_prompt == "[Image #1] can you figure out why codex titles are missing?"
+    assert sessions[0].title == "[Image #1] can you figure out why codex titles are missing?"
+
+
 def test_opencode_collector(opencode_db: Path):
     sessions = collectors.collect_opencode(db_path=opencode_db)
     assert len(sessions) == 1  # archived session excluded
@@ -419,6 +441,19 @@ def test_parse_ps_detects_only_terminal_agents():
     assert opencode.pid == 64028
     assert opencode.tty == "ttys003"
     assert opencode.elapsed == "1h 48m"
+
+
+def test_parse_ps_keeps_one_codex_agent_per_terminal():
+    from agents import _parse_ps
+
+    ps_output = """\
+ 60200 ttys007      03:45 node /Users/josephtutera/.nvm/versions/node/v24.14.1/bin/codex
+ 60201 ttys007      03:45 /Users/josephtutera/.nvm/versions/node/v24.14.1/lib/node_modules/@openai/codex/vendor/bin/codex
+"""
+
+    agents = _parse_ps(ps_output)
+
+    assert [(agent.tool, agent.pid, agent.tty) for agent in agents] == [("codex", 60200, "ttys007")]
 
 
 def test_elapsed_formatting():
@@ -1688,6 +1723,19 @@ def test_render_usage_aligns_columns_and_firstparty_opencode():
     # the "5h" header sits directly above where the 5h bars start
     header, first_row = plain.splitlines()[0], plain.splitlines()[1]
     assert header.index("5h") == first_row.index("█")
+
+
+def test_render_usage_hides_windows_no_tool_reports():
+    from rich.text import Text
+    from usage import ToolUsage, UsageWindow
+
+    app = AdashApp()
+    app.usages = [ToolUsage(tool="codex", plan="Pro", windows=[UsageWindow("7d", 0.0)])]
+
+    plain = Text.from_markup(app._usage_text()).plain
+
+    assert "7d" in plain
+    assert "5h" not in plain
 
 
 def test_render_usage_adds_fable_column_only_where_present():

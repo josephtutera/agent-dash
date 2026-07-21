@@ -832,21 +832,24 @@ class AdashApp(App):
         return f"{marker} {tool_seg}{plan_seg}"
 
     def _usage_text(self, width: int | None = None) -> str:
-        # the third column is a model-scoped weekly limit (e.g. "fable"), shown
-        # only when some plan actually reports one
-        extra = next(
-            (w.label for u in self.usages for w in u.windows if w.label not in ("5h", "7d")),
-            None,
+        # Codex can report only its weekly window. Build the grid from the
+        # windows actually present instead of showing a permanent empty 5h cell.
+        reported = {w.label for usage in self.usages for w in usage.windows}
+        if any(usage.spend is not None for usage in self.usages):
+            reported.add("7d")
+        labels = [label for label in ("5h", "7d") if label in reported]
+        labels.extend(
+            label for label in dict.fromkeys(
+                w.label for usage in self.usages for w in usage.windows
+                if w.label not in ("5h", "7d")
+            )
         )
         # room left for a stale marker after the bars; the grid comes first, so a
         # narrow terminal drops the marker rather than wrapping the row
-        cells = 3 if extra else 2
+        cells = len(labels)
         marker_room = (width or 200) - (2 + USAGE_TOOL_W + USAGE_PLAN_W
                                         + cells * (USAGE_CELL_W + len(USAGE_GAP)))
-        cols = (
-            _pad_visible("5h", 2, USAGE_CELL_W + len(USAGE_GAP))
-            + (_pad_visible("7d", 2, USAGE_CELL_W + len(USAGE_GAP)) + extra if extra else "7d")
-        )
+        cols = USAGE_GAP.join(_pad_visible(label, len(label), USAGE_CELL_W) for label in labels)
         header = _pad_visible("", 0, 2) + "[dim]" + (
             _pad_visible("plan", 4, USAGE_TOOL_W + USAGE_PLAN_W) + cols
         ) + "[/]"
@@ -863,13 +866,12 @@ class AdashApp(App):
                     f"[#c7d4f0]${usage.spend:.2f}[/] "
                     f"[dim]· {sess} session{'s' if sess != 1 else ''} · {usage.spend_days}d[/]"
                 )
-                lines.append(f"{prefix}{empty}{USAGE_GAP}{spend_cell}")
+                cells = [spend_cell if label == "7d" else empty for label in labels]
+                lines.append(f"{prefix}{USAGE_GAP.join(cells)}")
                 continue
             windows = {w.label: w for w in usage.windows}
             p = self._boot
-            row = f"{prefix}{_window_cell(windows.get('5h'), p)}{USAGE_GAP}{_window_cell(windows.get('7d'), p)}"
-            if extra and extra in windows:  # this plan has the scoped limit; add its cell
-                row += f"{USAGE_GAP}{_window_cell(windows[extra], p)}"
+            row = f"{prefix}{USAGE_GAP.join(_window_cell(windows.get(label), p) for label in labels)}"
             if usage.stale and marker_room >= 6:  # cached bars: say so after them
                 mark = _truncate(usage.stale, marker_room)
                 row += f"{USAGE_GAP}[dim]{escape(mark)}[/]"
