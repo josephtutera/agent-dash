@@ -117,19 +117,22 @@ final class HUDViewTests: XCTestCase {
         XCTAssertEqual(Array(data.prefix(4)), [0x89, 0x50, 0x4E, 0x47])
     }
 
-    // MARK: - Embedded OpenAI mark
+    // MARK: - Embedded brand-mark assets
 
     #if canImport(AppKit)
-    func testOpenAIMarkAssetDecodesToTemplateImage() {
-        let data = Data(base64Encoded: OpenAIMarkAsset.pngBase64, options: .ignoreUnknownCharacters)
-        XCTAssertNotNil(data, "embedded OpenAI mark base64 must decode")
-        XCTAssertGreaterThan(data?.count ?? 0, 500, "decoded PNG suspiciously small")
-        XCTAssertEqual(Array(data!.prefix(4)), [0x89, 0x50, 0x4E, 0x47], "not a PNG")
-
-        let image = OpenAIMark.templateImage
-        XCTAssertTrue(image.isTemplate, "mark must be a template so it takes the tint")
-        XCTAssertGreaterThan(image.size.width, 0)
-        XCTAssertGreaterThan(image.size.height, 0)
+    func testBrandMarkAssetsDecodeToTemplateImages() {
+        for (name, base64, image) in [
+            ("Claude", ClaudeMarkAsset.pngBase64, ClaudeMark.templateImage),
+            ("OpenAI", OpenAIMarkAsset.pngBase64, OpenAIMark.templateImage),
+        ] {
+            let data = Data(base64Encoded: base64, options: .ignoreUnknownCharacters)
+            XCTAssertNotNil(data, "\(name) mark base64 must decode")
+            XCTAssertGreaterThan(data?.count ?? 0, 500, "\(name) PNG suspiciously small")
+            XCTAssertEqual(Array(data!.prefix(4)), [0x89, 0x50, 0x4E, 0x47], "\(name) not a PNG")
+            XCTAssertTrue(image.isTemplate, "\(name) mark must be a template so it takes the tint")
+            XCTAssertGreaterThan(image.size.width, 0)
+            XCTAssertGreaterThan(image.size.height, 0)
+        }
     }
     #endif
 }
