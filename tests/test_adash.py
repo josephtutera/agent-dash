@@ -309,8 +309,8 @@ def test_app_new_session_opens_warp_tab(tmp_path: Path, monkeypatch: pytest.Monk
 
     asyncio.run(run())
     slug = app_module._dir_slug(os.getcwd())
-    assert opened == [["open", f"warp://tab_config/josephcode-codex-{slug}"]]
-    config = (tmp_path / "tab_configs" / f"josephcode-codex-{slug}.toml").read_text()
+    assert opened == [["open", f"warp://tab_config/agentdash-codex-{slug}"]]
+    config = (tmp_path / "tab_configs" / f"agentdash-codex-{slug}.toml").read_text()
     assert 'commands = ["codex"]' in config
     assert f'directory = "{os.getcwd()}"' in config
 
@@ -318,7 +318,7 @@ def test_app_new_session_opens_warp_tab(tmp_path: Path, monkeypatch: pytest.Monk
 def test_banner_art_picks_a_font_that_fits():
     import pyfiglet
 
-    arts = [pyfiglet.figlet_format("JosephCode", font=f).rstrip() for f in app_module.BANNER_FONTS]
+    arts = [pyfiglet.figlet_format(app_module.BANNER_TEXT, font=f).rstrip() for f in app_module.BANNER_FONTS]
     widths = [max(len(line) for line in art.splitlines()) for art in arts]
 
     assert widths == sorted(widths, reverse=True), "BANNER_FONTS must be widest-first"
@@ -326,6 +326,30 @@ def test_banner_art_picks_a_font_that_fits():
     assert app_module._banner_art(widths[0] - 1) == arts[1]
     assert app_module._banner_art(widths[-1]) == arts[-1]
     assert app_module._banner_art(widths[-1] - 1) == ""  # nothing fits: plain-text fallback
+
+
+def test_boot_sweep_pegs_then_settles_to_true():
+    sweep = app_module._sweep_pct
+    peak = app_module._BOOT_PEAK
+
+    # starts empty, ends at the true reading no matter what that reading is
+    assert sweep(16.0, 0.0) == 0.0
+    assert sweep(16.0, 1.0) == 16.0
+    assert sweep(93.0, 1.0) == 93.0
+    # at the peak of the sweep every gauge is pegged to full scale
+    assert sweep(16.0, peak) == pytest.approx(100.0)
+    assert sweep(93.0, peak) == pytest.approx(100.0)
+    # a window a tool doesn't report stays absent through the whole sweep
+    assert sweep(None, 0.3) is None
+    assert sweep(None, 1.0) is None
+    # monotonic rise up to the peg, monotonic settle down to the true value after
+    rise = [sweep(16.0, p / 100) for p in range(0, int(peak * 100) + 1)]
+    assert rise == sorted(rise)
+    settle = [sweep(16.0, peak + d) for d in (0.0, 0.1, 0.2, (1.0 - peak) - 0.001)]
+    assert settle == sorted(settle, reverse=True)
+    # never overshoots outside the [true, peg] envelope
+    for p in range(0, 101):
+        assert 0.0 <= sweep(16.0, p / 100) <= 100.0
 
 
 def test_banner_never_exceeds_its_width(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
@@ -782,8 +806,8 @@ def test_launch_tools_includes_terminal():
 
 def test_terminal_tab_config_opens_bare_shell(tmp_path: Path):
     stem = app_module._write_tab_config("terminal", "/tmp/proj", tmp_path)
-    assert stem == "josephcode-terminal"
-    config = (tmp_path / "josephcode-terminal.toml").read_text()
+    assert stem == "agentdash-terminal"
+    config = (tmp_path / "agentdash-terminal.toml").read_text()
     assert 'directory = "/tmp/proj"' in config
     assert "commands" not in config  # a plain shell, no agent command
     assert 'name = "terminal · proj"' in config
@@ -791,7 +815,7 @@ def test_terminal_tab_config_opens_bare_shell(tmp_path: Path):
 
 def test_agent_tab_config_still_has_command(tmp_path: Path):
     app_module._write_tab_config("codex", "/tmp/proj", tmp_path)
-    config = (tmp_path / "josephcode-codex.toml").read_text()
+    config = (tmp_path / "agentdash-codex.toml").read_text()
     assert 'commands = ["codex"]' in config
 
 
@@ -941,8 +965,8 @@ def test_quick_key_launches_claude_in_cwd(tmp_path: Path, monkeypatch: pytest.Mo
 
     asyncio.run(run())
     slug = app_module._dir_slug(os.getcwd())
-    assert opened == [["open", f"warp://tab_config/josephcode-claude-{slug}"]]
-    config = (tmp_path / "tab_configs" / f"josephcode-claude-{slug}.toml").read_text()
+    assert opened == [["open", f"warp://tab_config/agentdash-claude-{slug}"]]
+    config = (tmp_path / "tab_configs" / f"agentdash-claude-{slug}.toml").read_text()
     assert 'commands = ["claude"]' in config
     assert f'directory = "{os.getcwd()}"' in config
 
@@ -971,7 +995,7 @@ def test_inline_picker_opens_a_tab_per_enter(tmp_path: Path, monkeypatch: pytest
     asyncio.run(run())
     assert len(opened) == 2  # cwd + /tmp
     stems = sorted(o[1].split("/")[-1] for o in opened)
-    assert stems == sorted([f"josephcode-claude-{app_module._dir_slug(os.getcwd())}", "josephcode-claude-tmp"])
+    assert stems == sorted([f"agentdash-claude-{app_module._dir_slug(os.getcwd())}", "agentdash-claude-tmp"])
 
 
 def test_picker_launches_selected_tool(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
@@ -989,7 +1013,7 @@ def test_picker_launches_selected_tool(tmp_path: Path, monkeypatch: pytest.Monke
 
     asyncio.run(run())
     slug = app_module._dir_slug(os.getcwd())
-    assert opened == [["open", f"warp://tab_config/josephcode-codex-{slug}"]]
+    assert opened == [["open", f"warp://tab_config/agentdash-codex-{slug}"]]
 
 
 def test_recent_dirs_pins_cwd_first(monkeypatch: pytest.MonkeyPatch):
@@ -1404,7 +1428,7 @@ def test_other_directory_row_launches_typed_path(tmp_path: Path, monkeypatch: py
 
     asyncio.run(run())
     slug = app_module._dir_slug(str(target))
-    assert opened == [["open", f"warp://tab_config/josephcode-claude-{slug}"]]
+    assert opened == [["open", f"warp://tab_config/agentdash-claude-{slug}"]]
 
 
 def test_other_directory_rejects_missing_path(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
@@ -1433,7 +1457,7 @@ def test_other_directory_rejects_missing_path(tmp_path: Path, monkeypatch: pytes
 
 def test_focus_warp_tab_stops_after_one_rotation(monkeypatch: pytest.MonkeyPatch):
     # three tabs, none matching the hint; the active tab wraps around the set
-    titles = ["◆ JosephCode", "✳ tab two", "✳ tab three"]
+    titles = ["◆ Agent Dash", "✳ tab two", "✳ tab three"]
     state = {"i": 0}
     calls = []
 

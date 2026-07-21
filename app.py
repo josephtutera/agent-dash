@@ -35,7 +35,7 @@ USAGE_PCT_W = 4  # right-aligned percent, e.g. " 16%", "100%"
 USAGE_CELL_W = USAGE_BAR_W + 1 + USAGE_PCT_W + 1 + USAGE_RESET_W
 USAGE_GAP = "   "  # between the 5h and 7d columns
 MAX_ACTIVE_ROWS = 6
-BANNER_TEXT = "JosephCode"
+BANNER_TEXT = "Agent Dash"
 BANNER_FONTS = ("slant", "small")  # widest first; each is measured before use
 # columns never available to the banner: its own padding (2 per side) plus the
 # screen's vertical scrollbar, assumed always present so the art still fits if
@@ -51,6 +51,11 @@ ACTIVE_POLL_SECONDS = 2.0  # live activity refresh (cheap: file reads + one ps)
 # this stays slow on purpose: the 5h/7d bars move far too gradually to be worth
 # a tighter loop. usage.py caches on top of this and backs off on a 429.
 USAGE_POLL_SECONDS = 180.0
+# Boot "self-test" sweep: on the first usage load every gauge rises to a
+# full-scale peg, then eases down to its true reading, the way an instrument
+# panel runs its needle sweep at ignition. _boot goes 0 -> 1 over these seconds.
+BOOT_SWEEP_SECONDS = 0.85
+_BOOT_PEAK = 0.55  # fraction of the sweep spent rising to the peg before settling
 
 
 def _banner_art(width: int) -> str:
@@ -96,6 +101,26 @@ def _fmt_reset_compact(dt: datetime | None) -> str:
     return local.strftime("%b%d")
 
 
+def _ease_out(t: float) -> float:
+    """Cubic ease-out (fast start, gentle stop) — a needle easing into place."""
+    t = max(0.0, min(1.0, t))
+    return 1.0 - (1.0 - t) ** 3
+
+
+def _sweep_pct(true_pct: float | None, progress: float) -> float | None:
+    """Reading a gauge shows at boot frame `progress` (0..1): it rises from 0 to
+    a full-scale peg, then eases down to its true value — an instrument self-test
+    sweep. A window a tool doesn't report (None) stays None the whole way."""
+    if true_pct is None:
+        return None
+    if progress >= 1.0:
+        return true_pct
+    if progress <= _BOOT_PEAK:  # rising to the peg
+        return 100.0 * _ease_out(progress / _BOOT_PEAK)
+    settle = _ease_out((progress - _BOOT_PEAK) / (1.0 - _BOOT_PEAK))  # peg -> true
+    return 100.0 + (true_pct - 100.0) * settle
+
+
 def _usage_bar(pct: float | None) -> str:
     """Mini bar of exactly USAGE_BAR_W visible columns for the aligned grid."""
     if pct is None:
@@ -104,13 +129,17 @@ def _usage_bar(pct: float | None) -> str:
     return f"[{_usage_color(pct)}]{'█' * filled}[/][#1b2233]{'░' * (USAGE_BAR_W - filled)}[/]"
 
 
-def _window_cell(win: "UsageWindow | None") -> str:
+def _window_cell(win: "UsageWindow | None", progress: float = 1.0) -> str:
     """A fixed-width (USAGE_CELL_W) cell: mini-bar + percent + compact reset.
 
     A missing window (a tool that doesn't report this limit) renders as an empty
     bar with a dim dash, so the column still lines up with its neighbors.
+    `progress` < 1.0 sweeps the reading during the boot self-test; the bar,
+    percent, and color all track the swept value so the whole cell animates.
     """
     pct = win.pct if win else None
+    if progress < 1.0:
+        pct = _sweep_pct(pct, progress)
     bar = _usage_bar(pct)
     if pct is None:
         pct_markup = f"[#55647f]{'—'.rjust(USAGE_PCT_W)}[/]"
@@ -222,7 +251,7 @@ def _write_tab_config(tool: str, cwd: str, configs_dir: Path, suffix: str = "", 
     command (used to point claude at a non-default CLAUDE_CONFIG_DIR account).
     When the tool has no command (terminal), the tab opens a bare shell.
     """
-    stem = f"josephcode-{tool}" + (f"-{suffix}" if suffix else "")
+    stem = f"agentdash-{tool}" + (f"-{suffix}" if suffix else "")
     label = "terminal" if tool == "terminal" else tool
     lines = [
         f'name = "{label} · {Path(cwd).name or cwd}"',
@@ -308,7 +337,7 @@ class _ActivePanel(Static):
 
 
 class AdashApp(App):
-    TITLE = "JosephCode"
+    TITLE = "Agent Dash"
 
     CSS = """
     Screen {
@@ -401,6 +430,12 @@ class AdashApp(App):
         self._spin = 0  # spinner frame for working agents
         self.active_claude: str | None = None  # active claude plan label (multi-account)
         self.cleared_at = _load_cleared()
+        # boot self-test sweep: 1.0 means "settled" (true readings) so any render
+        # before the animation shows real values; the first usage load drops it to
+        # 0.0 and animates it back to 1.0, sweeping every gauge on the way up.
+        self._boot = 1.0
+        self._boot_started = False
+        self._boot_timer = None
 
     def compose(self) -> ComposeResult:
         yield Static(id="banner")
@@ -427,6 +462,7 @@ class AdashApp(App):
         self.query_one("#active", Static).border_title = "active now"
         self.query_one("#usage", Static).border_title = "subscriptions"
         self._render_banner()
+        self._power_on_banner()
         self.dirs = self._recent_dirs()
         self._render_launch()
         self._render_picker()
@@ -443,6 +479,31 @@ class AdashApp(App):
         if any(a.state == "working" for a in self.running):
             self._spin += 1
             self._render_active()
+
+    # ------------------------------------------------------------- boot sweep
+
+    def _power_on_banner(self) -> None:
+        """Fade the banner up from dark, like an instrument display lighting up.
+        Opacity is a style, not content, so this never touches the figlet art."""
+        try:
+            banner = self.query_one("#banner", Static)
+            banner.styles.opacity = 0.0
+            banner.styles.animate("opacity", value=1.0, duration=0.5)
+        except Exception:
+            pass  # animation is decorative; never let it block boot
+
+    def _start_boot_sweep(self) -> None:
+        """Run the gauge self-test: sweep _boot 0 -> 1 and re-render each frame."""
+        self._boot = 0.0
+        step = 1.0 / 30.0  # ~30fps
+        self._boot_timer = self.set_interval(step, lambda: self._advance_boot(step))
+
+    def _advance_boot(self, step: float) -> None:
+        self._boot = min(1.0, self._boot + step / BOOT_SWEEP_SECONDS)
+        self._render_usage()
+        if self._boot >= 1.0 and self._boot_timer is not None:
+            self._boot_timer.stop()
+            self._boot_timer = None
 
     # ------------------------------------------------------------- chrome
 
@@ -736,6 +797,11 @@ class AdashApp(App):
             self.active_claude = next(
                 (u.label for u in usages if u.tool == "claude" and u.label and u.active), None
             )
+        # the gauges only mean anything once they have data, so the self-test
+        # sweep waits for the first load rather than firing on an empty panel
+        if not self._boot_started and usages:
+            self._boot_started = True
+            self._start_boot_sweep()
         self._render_usage()
 
     def _usage_prefix(self, usage: ToolUsage) -> str:
@@ -787,9 +853,10 @@ class AdashApp(App):
                 lines.append(f"{prefix}{empty}{USAGE_GAP}{spend_cell}")
                 continue
             windows = {w.label: w for w in usage.windows}
-            row = f"{prefix}{_window_cell(windows.get('5h'))}{USAGE_GAP}{_window_cell(windows.get('7d'))}"
+            p = self._boot
+            row = f"{prefix}{_window_cell(windows.get('5h'), p)}{USAGE_GAP}{_window_cell(windows.get('7d'), p)}"
             if extra and extra in windows:  # this plan has the scoped limit; add its cell
-                row += f"{USAGE_GAP}{_window_cell(windows[extra])}"
+                row += f"{USAGE_GAP}{_window_cell(windows[extra], p)}"
             if usage.stale and marker_room >= 6:  # cached bars: say so after them
                 mark = _truncate(usage.stale, marker_room)
                 row += f"{USAGE_GAP}[dim]{escape(mark)}[/]"
