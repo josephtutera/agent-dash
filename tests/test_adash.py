@@ -7,6 +7,7 @@ import json
 import os
 import sqlite3
 import sys
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -244,6 +245,32 @@ def test_claude_title_from_slash_command(tmp_path: Path):
     assert sessions[0].title == "/fix-pr-feedback 3059"
 
 
+def test_bare_slash_command_loses_to_a_real_prompt(tmp_path: Path):
+    """"/model" says nothing about which session this is, so a prompt typed
+    afterwards is the better title. A command with args already describes the
+    work, so that still wins."""
+    root = tmp_path / "claude" / "projects"
+    _write_jsonl(
+        root / "-tmp-bare" / "sess-bare.jsonl",
+        [
+            {"type": "user", "cwd": "/tmp/bare", "message": {"role": "user",
+             "content": "<command-message>model</command-message>\n<command-name>/model</command-name>"}},
+            {"type": "user", "cwd": "/tmp/bare", "message": {"role": "user", "content": "wire up the billing webhook"}},
+        ],
+    )
+    _write_jsonl(
+        root / "-tmp-args" / "sess-args.jsonl",
+        [
+            {"type": "user", "cwd": "/tmp/args", "message": {"role": "user",
+             "content": "<command-message>review</command-message>\n<command-name>/review</command-name>\n<command-args>412</command-args>"}},
+            {"type": "user", "cwd": "/tmp/args", "message": {"role": "user", "content": "wire up the billing webhook"}},
+        ],
+    )
+    titles = {s.id: s.title for s in collectors.collect_claude(root=root)}
+    assert titles["sess-bare"] == "Wire up the billing webhook"
+    assert titles["sess-args"] == "/review 412"
+
+
 def test_claude_title_skips_injected_messages(tmp_path: Path):
     root = tmp_path / "claude" / "projects"
     _write_jsonl(
@@ -356,10 +383,7 @@ def test_elapsed_formatting():
     assert _elapsed("07-09:23:04") == "7d 9h"
 
 
-def test_title_for_matches_session_by_cwd():
-    from agents import RunningAgent
-
-    agent = RunningAgent(tool="claude", pid=1, tty="ttys003", elapsed="5m", cwd="/tmp/proj")
+def _titled_app(*agents):
     app = AdashApp()
     app.sessions = [
         Session(tool="claude", id="a", title="Older", project_dir="/tmp/proj",
@@ -370,7 +394,46 @@ def test_title_for_matches_session_by_cwd():
                 last_active=datetime(2026, 7, 19, tzinfo=timezone.utc)),
     ]
     app.sessions.sort(key=lambda s: s.last_active, reverse=True)
-    assert app._title_for(agent) == "Newest"
+    app.running = list(agents)
+    app._resolve_agent_titles()
+    return app
+
+
+def test_title_for_matches_session_by_cwd():
+    from agents import RunningAgent
+
+    agent = RunningAgent(tool="claude", pid=1, tty="ttys003", elapsed="5m", cwd="/tmp/proj")
+    assert _titled_app(agent)._title_for(agent) == "Newest"
+
+
+def test_title_for_prefers_the_exact_session_id():
+    """The pid file names the transcript, so recency never overrides it."""
+    from agents import RunningAgent
+
+    agent = RunningAgent(tool="claude", pid=1, tty="ttys003", elapsed="5m",
+                         cwd="/tmp/proj", session_id="a")
+    assert _titled_app(agent)._title_for(agent) == "Older"
+
+
+def test_two_agents_in_one_directory_get_different_titles():
+    """Without this, both web-app tabs showed the same title and were unusable."""
+    from agents import RunningAgent
+
+    older = RunningAgent(tool="claude", pid=100, tty="ttys001", elapsed="2h", cwd="/tmp/proj")
+    newer = RunningAgent(tool="claude", pid=900, tty="ttys002", elapsed="5m", cwd="/tmp/proj")
+    app = _titled_app(older, newer)
+    assert app._title_for(newer) == "Newest"  # newest process -> newest transcript
+    assert app._title_for(older) == "Older"
+
+
+def test_title_falls_back_to_directory_when_sessions_run_out():
+    from agents import RunningAgent
+
+    a = RunningAgent(tool="claude", pid=1, tty="ttys001", elapsed="1m", cwd="/tmp/proj")
+    b = RunningAgent(tool="claude", pid=2, tty="ttys002", elapsed="1m", cwd="/tmp/proj")
+    c = RunningAgent(tool="claude", pid=3, tty="ttys003", elapsed="1m", cwd="/tmp/proj")
+    app = _titled_app(a, b, c)  # only two claude sessions exist for this dir
+    assert app._title_for(a) == "proj"
 
 
 # ---------------------------------------------------------------- tui
@@ -395,7 +458,7 @@ def _stub_usage(monkeypatch: pytest.MonkeyPatch) -> None:
         ToolUsage(tool="opencode", note="no subscription · API spend 7d: $1.00 across 2 sessions"),
     ]
     monkeypatch.setattr(app_module, "collect_usage",
-                        lambda active_claude=None: (usages, datetime.now(timezone.utc)))
+                        lambda active_claude=None, force=False: (usages, datetime.now(timezone.utc)))
 
 
 def _stub_running(monkeypatch: pytest.MonkeyPatch, agents: list | None = None) -> None:
@@ -884,21 +947,26 @@ def test_quick_key_launches_claude_in_cwd(tmp_path: Path, monkeypatch: pytest.Mo
     assert f'directory = "{os.getcwd()}"' in config
 
 
-def test_inline_picker_multiselect_opens_multiple_tabs(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+def test_inline_picker_opens_a_tab_per_enter(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """Enter opens exactly the highlighted directory and leaves the picker up,
+    so several tabs is several presses rather than a checkbox multi-select."""
     opened = _launch_harness(tmp_path, monkeypatch)
 
     async def run() -> None:
         app = AdashApp(cmd_file=str(tmp_path / "cmd"))
         async with app.run_test(size=(110, 40)) as pilot:
             await _wait_for_table(pilot, app)
-            assert len(app.dirs) == 2  # cwd (preselected) + /tmp
+            assert len(app.dirs) == 2  # cwd + /tmp
             await pilot.press("down")   # launch -> picker[0] (cwd)
-            await pilot.press("down")   # -> picker[1] (/tmp)
-            await pilot.press("space")  # also select /tmp
-            await pilot.pause(0.05)
-            assert app.picker_selected == {0, 1}
-            await pilot.press("enter")  # open both
+            await pilot.press("enter")  # opens cwd only
             await pilot.pause(0.1)
+            assert len(opened) == 1
+            assert app.zone == "picker"  # picker stays up for the next one
+            await pilot.press("down")   # -> picker[1] (/tmp)
+            await pilot.press("enter")
+            await pilot.pause(0.1)
+            # the footer echoes both directories opened this run
+            assert app.picker_opened == [os.getcwd(), "/tmp"]
 
     asyncio.run(run())
     assert len(opened) == 2  # cwd + /tmp
@@ -977,11 +1045,197 @@ def test_fetch_claude_usages_labels_and_active(monkeypatch: pytest.MonkeyPatch):
     ]
     monkeypatch.setattr(usage_module, "claude_profiles", lambda home=None: profiles)
     monkeypatch.setattr(usage_module, "fetch_claude_usage_for",
-                        lambda p: ToolUsage(tool="claude", plan=p.label.title()))
+                        lambda p, force=False: ToolUsage(tool="claude", plan=p.label.title()))
 
     usages = usage_module.fetch_claude_usages(active_label="personal")
     assert [u.label for u in usages] == ["carepilot", "personal"]
     assert [u.active for u in usages] == [False, True]  # personal is active
+
+
+# ------------------------------------------------- usage cache + rate limiting
+
+
+@pytest.fixture
+def usage_probe(monkeypatch: pytest.MonkeyPatch):
+    """A stubbed usage endpoint with a call counter, plus a clean cache.
+
+    Returns (profile, probe) where probe.calls counts endpoint hits and
+    probe.fail is set to a RateLimited instance to make the next call 429.
+    """
+    import usage as usage_module
+    from usage import ClaudeProfile, ToolUsage, UsageWindow
+
+    usage_module._claude_cache.clear()
+
+    class Probe:
+        calls = 0
+        fail: Exception | None = None  # set to RateLimited to make the next call 429
+        error: str | None = None  # set to simulate a transient (non-429) failure
+        pct = 40.0
+
+    probe = Probe()
+
+    def fake_fetch(token: str, plan: str) -> ToolUsage:
+        probe.calls += 1
+        if probe.fail is not None:
+            raise probe.fail
+        if probe.error is not None:
+            return ToolUsage(tool="claude", plan=plan, error=probe.error)
+        return ToolUsage(tool="claude", plan=plan, windows=[UsageWindow("5h", probe.pct)])
+
+    monkeypatch.setattr(usage_module, "_profile_credentials", lambda p: ("tok", "Max"))
+    monkeypatch.setattr(usage_module, "_claude_usage_from_token", fake_fetch)
+    yield ClaudeProfile(label="personal", config_dir=Path("/x/.claude-personal")), probe
+    usage_module._claude_cache.clear()
+
+
+def test_claude_usage_serves_cache_within_ttl(usage_probe):
+    import usage as usage_module
+
+    profile, probe = usage_probe
+    first = usage_module.fetch_claude_usage_for(profile)
+    second = usage_module.fetch_claude_usage_for(profile)
+
+    assert probe.calls == 1  # the second read never touched the endpoint
+    assert first.windows[0].pct == second.windows[0].pct == 40.0
+    assert not second.stale  # a fresh cache hit isn't flagged as old
+
+    # the manual refresh key skips the freshness check
+    usage_module.fetch_claude_usage_for(profile, force=True)
+    assert probe.calls == 2
+
+    # ...but an expired entry refetches on its own
+    entry = usage_module._claude_cache[str(profile.config_dir)]
+    entry.fetched_at -= usage_module.USAGE_CACHE_TTL_SECONDS + 1
+    usage_module.fetch_claude_usage_for(profile)
+    assert probe.calls == 3
+
+
+def test_claude_cache_hands_out_copies(usage_probe):
+    """fetch_claude_usages stamps .label/.active on what it gets back; if that
+    were the cached object those stamps would leak into later reads."""
+    import usage as usage_module
+
+    profile, _ = usage_probe
+    first = usage_module.fetch_claude_usage_for(profile)
+    first.label = "personal"
+    first.active = False
+    second = usage_module.fetch_claude_usage_for(profile)
+    assert second.label == "" and second.active is True
+
+
+def test_claude_429_keeps_last_bars_and_backs_off(usage_probe):
+    import usage as usage_module
+
+    profile, probe = usage_probe
+    usage_module.fetch_claude_usage_for(profile)  # prime the cache with real bars
+    probe.fail = usage_module.RateLimited()
+
+    limited = usage_module.fetch_claude_usage_for(profile, force=True)
+    assert limited.windows[0].pct == 40.0  # last good reading survives the 429
+    assert limited.error is None  # no raw "HTTP Error 429" splattered on the row
+    assert "rate limited" in limited.stale
+
+    # inside the cooldown we stop asking entirely, even when the user mashes `r`
+    calls_before = probe.calls
+    again = usage_module.fetch_claude_usage_for(profile, force=True)
+    assert probe.calls == calls_before
+    assert "rate limited" in again.stale
+
+    entry = usage_module._claude_cache[str(profile.config_dir)]
+    assert entry.backoff == usage_module.RATE_LIMIT_BACKOFF_START
+
+    # a repeat 429 once the cooldown lapses doubles the penalty
+    entry.cooldown_until = 0.0
+    usage_module.fetch_claude_usage_for(profile, force=True)
+    assert entry.backoff == usage_module.RATE_LIMIT_BACKOFF_START * 2
+    assert entry.backoff <= usage_module.RATE_LIMIT_BACKOFF_MAX
+
+
+def test_claude_429_recovery_clears_backoff(usage_probe):
+    import usage as usage_module
+
+    profile, probe = usage_probe
+    usage_module.fetch_claude_usage_for(profile)
+    probe.fail = usage_module.RateLimited()
+    usage_module.fetch_claude_usage_for(profile, force=True)
+
+    entry = usage_module._claude_cache[str(profile.config_dir)]
+    entry.cooldown_until = 0.0
+    probe.fail, probe.pct = None, 55.0
+    recovered = usage_module.fetch_claude_usage_for(profile, force=True)
+
+    assert recovered.windows[0].pct == 55.0
+    assert not recovered.stale
+    assert entry.backoff == 0.0 and entry.cooldown_until == 0.0
+
+
+def test_claude_429_honors_retry_after(usage_probe):
+    import usage as usage_module
+
+    profile, probe = usage_probe
+    probe.fail = usage_module.RateLimited(retry_after=45.0)
+    limited = usage_module.fetch_claude_usage_for(profile)
+
+    # no cached reading yet, so the marker lands in the error slot -- but short,
+    # and using the server's own number rather than our default backoff
+    assert limited.error == "rate limited · retry 45s"
+    entry = usage_module._claude_cache[str(profile.config_dir)]
+    assert 40 < entry.cooldown_until - time.monotonic() <= 45
+
+
+def test_transient_error_is_not_cached(usage_probe):
+    """A network blip should retry on the next poll, not stick around for the
+    whole TTL the way a good reading does."""
+    import usage as usage_module
+
+    profile, probe = usage_probe
+    probe.error = "urlopen error timed out"
+
+    first = usage_module.fetch_claude_usage_for(profile)
+    assert first.error == "urlopen error timed out"
+
+    second = usage_module.fetch_claude_usage_for(profile)
+    assert probe.calls == 2  # retried immediately rather than serving the failure
+    assert usage_module._claude_cache[str(profile.config_dir)].usage is None
+
+
+def test_render_usage_shows_stale_marker():
+    from rich.text import Text
+    from usage import ToolUsage, UsageWindow
+
+    app = AdashApp()
+    app.usages = [
+        ToolUsage(tool="claude", plan="Max", windows=[UsageWindow("5h", 97.0)],
+                  stale="rate limited · retry 2m"),
+    ]
+    row = Text.from_markup(app._usage_text()).plain.splitlines()[1]
+    assert "97%" in row  # the bars stay put
+    assert "rate limited · retry 2m" in row
+
+
+def test_stale_marker_never_wraps_the_usage_grid():
+    """The bars are the point; when the marker won't fit beside them it gives
+    way rather than pushing the row onto a second line. (The 3-column grid is
+    ~91 cols on its own, so the bar to clear is the grid, not the terminal.)"""
+    from rich.text import Text
+    from usage import ToolUsage, UsageWindow
+
+    windows = [UsageWindow("5h", 97.0), UsageWindow("7d", 4.0), UsageWindow("fable", 12.0)]
+    app = AdashApp()
+
+    def row_at(width: int | None, stale: str) -> str:
+        app.usages = [ToolUsage(tool="claude", plan="Max", stale=stale, windows=windows)]
+        return Text.from_markup(app._usage_text(width)).plain.splitlines()[1]
+
+    for width in (80, 100, 117, 160):
+        bare, marked = row_at(width, ""), row_at(width, "rate limited · retry 2m")
+        assert "97%" in marked  # the grid survives at every width
+        # the marker either fits inside the terminal or isn't drawn at all
+        assert len(marked) <= max(width, len(bare)), f"marker widened the row at {width} cols"
+
+    assert "rate limited" not in row_at(100, "rate limited · retry 2m")  # no room
+    assert "rate limited" in row_at(160, "rate limited · retry 2m")  # plenty
 
 
 def test_write_tab_config_injects_config_dir_env(tmp_path: Path):
@@ -1016,7 +1270,8 @@ def test_app_tab_switches_claude_plan(tmp_path: Path, monkeypatch: pytest.Monkey
                   windows=[UsageWindow("5h", 62.0)]),
         ToolUsage(tool="codex", plan="Pro", windows=[UsageWindow("7d", 40.0)]),
     ]
-    monkeypatch.setattr(app_module, "collect_usage", lambda active_claude=None: (two_claude, datetime.now(timezone.utc)))
+    monkeypatch.setattr(app_module, "collect_usage",
+                        lambda active_claude=None, force=False: (two_claude, datetime.now(timezone.utc)))
     _stub_running(monkeypatch)
     monkeypatch.setattr(app_module, "collect_all", lambda limit=300: _fake_sessions())
 

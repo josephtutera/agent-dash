@@ -42,6 +42,7 @@ class LiveStatus:
     state: str = "unknown"  # "working" | "idle" | "waiting" | "unknown"
     label: str = ""  # human action, e.g. "running command"
     tokens: int = 0  # live token count for the session (0 if unknown)
+    session_id: str = ""  # transcript this process is writing ("" if unknown)
 
 
 def _read_json(path: str | Path) -> dict | None:
@@ -92,7 +93,11 @@ def claude_activity(root: str | Path | None = None) -> dict[int, LiveStatus]:
         if not data:
             continue
         status = (data.get("status") or "").lower()
-        st = LiveStatus(state="working" if status == "busy" else "idle" if status else "unknown")
+        sid = data.get("sessionId")
+        st = LiveStatus(
+            state="working" if status == "busy" else "idle" if status else "unknown",
+            session_id=sid if isinstance(sid, str) else "",
+        )
         if front_sid and data.get("sessionId") == front_sid:
             if front_state in ("permission", "waiting"):
                 st.state = "waiting"
@@ -204,4 +209,5 @@ def enrich(agents, claude_root=None, codex_root=None, opencode_db=None):
             agent.state = status.state
             agent.label = status.label
             agent.tokens = status.tokens
+            agent.session_id = status.session_id
     return agents
