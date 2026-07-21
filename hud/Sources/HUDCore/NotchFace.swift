@@ -69,15 +69,18 @@ public struct NotchFaceView: View {
             }
             .frame(width: cameraWidth)
 
-            // Right flank: the soonest-reset countdown, right-aligned.
-            HStack(spacing: 10) {
+            // Right flank: the live-agent strip, right-aligned — one colored
+            // dot per running agent (spinning while it works, amber pip when it
+            // needs you, dim when idle) plus the launcher chip. This replaces
+            // the countdown, so any motion on the right means work is happening.
+            HStack(spacing: 0) {
                 Spacer(minLength: 0)
-                if let soonest = snapshot?.soonestReset {
-                    Text(Fmt.countdown(to: soonest.resetsAt, now: now))
-                        .font(Theme.mono(12, weight: .medium))
-                        .foregroundStyle(Theme.amber)
-                        .monospacedDigit()
-                }
+                AgentClusterView(
+                    agents: snapshot?.agents ?? [],
+                    diameter: 18,
+                    onSelect: { AppActions.jumpToAgent($0) },
+                    onLaunch: { AppActions.openLauncher() }
+                )
             }
             .padding(.trailing, 16)
             .frame(width: Self.flankWidth)

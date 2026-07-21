@@ -82,6 +82,22 @@ extension Subscription {
 extension Agent {
     public var isWaiting: Bool { state == "waiting" }
     public var isWorking: Bool { state == "working" }
+    public var isIdle: Bool { !isWaiting && !isWorking }
+}
+
+/// Assigns one distinct color per running agent. Agents are colored in pid
+/// order so the mapping is deterministic across polls and every currently
+/// visible agent gets a different hue (until the palette wraps). Both the notch
+/// face and the dropdown list resolve through here, so a color in the bar maps
+/// to the same-colored row in the card.
+public enum AgentColors {
+    public static func assign(_ agents: [Agent]) -> [Int: Color] {
+        var map: [Int: Color] = [:]
+        for (i, agent) in agents.sorted(by: { $0.pid < $1.pid }).enumerated() {
+            map[agent.pid] = Theme.agentColor(i)
+        }
+        return map
+    }
 }
 
 extension HUDSnapshot {

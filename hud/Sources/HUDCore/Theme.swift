@@ -45,6 +45,30 @@ public enum Theme {
         provider == "codex" ? Color.white : claudeCoral
     }
 
+    // MARK: Agent identity
+    /// Distinct hues, one per running agent, so two sessions on the same tool
+    /// are still tellable apart at a glance in the notch. Tool is no longer the
+    /// color axis (most sessions are Claude); it moves to the dropdown label.
+    /// Kept clear of the severity green/amber/red the quota rings own.
+    public static let agentPalette: [Color] = [
+        claudeCoral,           // coral
+        Color(hex: 0x4EC9E0),  // cyan
+        Color(hex: 0xB58BFF),  // violet
+        Color(hex: 0xFF7EB6),  // pink
+        Color(hex: 0x5B9BFF),  // blue
+        Color(hex: 0x5AD1B0),  // teal
+        Color(hex: 0xE0B84E),  // gold
+        Color(hex: 0xC98BFF),  // orchid
+    ]
+
+    /// The agent color at a palette slot, wrapping if there are more agents
+    /// than hues (rare — you seldom run eight at once).
+    public static func agentColor(_ index: Int) -> Color {
+        guard !agentPalette.isEmpty else { return muted }
+        let n = agentPalette.count
+        return agentPalette[((index % n) + n) % n]
+    }
+
     // MARK: Type
     public static func mono(_ size: CGFloat, weight: Font.Weight = .regular) -> Font {
         .system(size: size, weight: weight, design: .monospaced)

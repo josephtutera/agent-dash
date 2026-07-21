@@ -202,20 +202,25 @@ struct AgentsSectionView: View {
                 }
             }
             ForEach(agents) { agent in
-                AgentRow(agent: agent, now: now)
+                AgentRow(agent: agent, color: colors[agent.pid] ?? Theme.toolColor(agent.tool), now: now)
             }
         }
     }
+
+    // Same assignment the notch face uses, so a color in the bar is the same
+    // color on the row here.
+    private var colors: [Int: Color] { AgentColors.assign(agents) }
 }
 
 struct AgentRow: View {
     let agent: Agent
+    let color: Color
     let now: Date
 
     var body: some View {
         HStack(spacing: 10) {
             Circle()
-                .fill(agent.isWaiting ? Theme.amber : Theme.toolColor(agent.tool))
+                .fill(color)
                 .frame(width: 7, height: 7)
 
             Text(agent.project)
@@ -372,5 +377,16 @@ public enum AppActions {
         proc.arguments = ["-a", "Warp"] // TODO(phase4): real agent-dash target
         try? proc.run()
         #endif
+    }
+
+    /// Jump to a running agent's terminal tab. Wired to the daemon in phase 3;
+    /// for now it surfaces Agent Dash so the click is never a dead end.
+    public static func jumpToAgent(_ agent: Agent) {
+        openAgentDash()
+    }
+
+    /// Open the new-session launcher (pick a tool + directory). Wired in phase 3.
+    public static func openLauncher() {
+        openAgentDash()
     }
 }

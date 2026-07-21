@@ -70,6 +70,10 @@ extension HUDSnapshot {
                   cwd: "/Users/j/agent-dash", state: "working",
                   action: "running swift build", sinceSeconds: 44,
                   subscriptionID: "codex"),
+            Agent(pid: 5602, tool: "opencode", project: "docs",
+                  cwd: "/Users/j/docs", state: "idle",
+                  action: nil, sinceSeconds: 61 * 60,
+                  subscriptionID: nil),
         ]
 
         let value = ValueBlock(
