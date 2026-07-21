@@ -10,6 +10,7 @@ import sys
 import time
 from datetime import datetime, timezone
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -2110,3 +2111,42 @@ def test_hud_value_carries_none_cost_and_multiple_through():
     hud = pricing.hud_value(report)
     assert hud["subs_cost_usd"] is None and hud["multiple"] is None
     json.dumps(hud)  # None is JSON-safe
+
+
+# ---------------------------------------------------------------- picker: cwd pin
+
+
+def _dir_sessions() -> list[Session]:
+    """Two history sessions in ordinary project dirs, proj-b more recent."""
+    now = datetime.now(timezone.utc)
+    return [
+        Session(tool="claude", id="a", title="t", project_dir="/tmp/proj-a",
+                last_active=now.replace(microsecond=1)),
+        Session(tool="claude", id="b", title="t", project_dir="/tmp/proj-b",
+                last_active=now.replace(microsecond=2)),
+    ]
+
+
+def test_recent_dirs_pins_cwd_when_not_a_worktree():
+    # The autouse conftest chdir's every test into a neutral (non-worktree) dir,
+    # so the current directory is a legitimate place to start a fresh session.
+    stub = SimpleNamespace(sessions=_dir_sessions())
+    dirs = [d for d, _count, _last in AdashApp._recent_dirs(stub)]
+    assert dirs[0] == os.getcwd()  # cwd pinned to the top
+    assert set(dirs[1:]) == {"/tmp/proj-a", "/tmp/proj-b"}
+
+
+def test_recent_dirs_does_not_pin_cwd_inside_a_worktree(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    # You never start a fresh session in a throwaway agent worktree, so when the
+    # picker itself is launched from inside one, cwd must not be pinned (mirroring
+    # how history already excludes worktree dirs). This is the regression guard.
+    worktree = tmp_path / ".claude" / "worktrees" / "foo"
+    worktree.mkdir(parents=True)
+    monkeypatch.chdir(worktree)
+
+    stub = SimpleNamespace(sessions=_dir_sessions())
+    dirs = [d for d, _count, _last in AdashApp._recent_dirs(stub)]
+    assert str(worktree) not in dirs  # the worktree cwd is not offered
+    assert dirs == ["/tmp/proj-b", "/tmp/proj-a"]  # ranked history dirs, unpinned

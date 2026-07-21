@@ -1007,7 +1007,8 @@ class AdashApp(App):
                 last[d] = s.last_active
         ranked = sorted(count, key=lambda d: last[d], reverse=True)
         cwd = os.getcwd()
-        ranked = [cwd] + [d for d in ranked if d != cwd]
+        if not _is_worktree(cwd):  # the pin honors the same exclusion as history
+            ranked = [cwd] + [d for d in ranked if d != cwd]
         return [(d, count.get(d, 0), last.get(d)) for d in ranked[:limit]]
 
     def _active_claude_profile(self):
