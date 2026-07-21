@@ -86,8 +86,14 @@ final class NotchController {
         let size = hosting.fittingSize
         let width = max(size.width, 1)
         let height = max(size.height, 1)
+        // Anchor just right of the physical notch so the pill never sits over
+        // the app's left-hand menus (Window/Help). Clamp so the (wider) hover
+        // card can't run off the right edge of the display.
+        let notchRightEdge = screen.frame.midX + state.cameraWidth / 2
+        let gap: CGFloat = 6
+        let x = min(notchRightEdge + gap, screen.frame.maxX - width - 8)
         let frame = NSRect(
-            x: screen.frame.midX - width / 2,
+            x: max(screen.frame.minX + 8, x),
             y: screen.frame.maxY - height,
             width: width,
             height: height
@@ -113,14 +119,17 @@ private struct NotchRoot: View {
     @EnvironmentObject var store: HUDStore
 
     var body: some View {
-        VStack(spacing: 6) {
+        // Leading-aligned so the compact face stays pinned to the same spot
+        // (right of the notch) whether or not the wider card is showing, instead
+        // of jumping as the panel grows.
+        VStack(alignment: .leading, spacing: 6) {
             NotchFaceView(
                 snapshot: store.snapshot,
                 now: store.now,
-                cameraWidth: state.cameraWidth,
-                height: state.faceHeight
+                height: state.faceHeight,
+                onSelect: { AppActions.jumpToAgent($0) },
+                onLaunch: { AppActions.openLauncher() }
             )
-            .onTapGesture { AppActions.openAgentDash() }
 
             if state.expanded {
                 PopoverCard(snapshot: store.snapshot, now: store.now)

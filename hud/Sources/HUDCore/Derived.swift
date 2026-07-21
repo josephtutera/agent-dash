@@ -105,6 +105,15 @@ extension HUDSnapshot {
         agents.filter { $0.isWaiting }.count
     }
 
+    /// The single tightest window across every subscription, spent limits
+    /// included, for the one severity ring the compact collapsed face carries so
+    /// a plan running dry still warns from the menu bar without the full card.
+    public var worstWindow: Window? {
+        subscriptions
+            .compactMap { $0.tightest }
+            .min { ($0.pctLeft ?? 101) < ($1.pctLeft ?? 101) }
+    }
+
     /// The single tightest *live* window across all subscriptions, with its
     /// owning sub, used for the one pace line under the card's meters. Spent
     /// limits (0% left) are excluded: a "dry at" projection is meaningless for

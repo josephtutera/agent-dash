@@ -1,91 +1,52 @@
 import SwiftUI
 
-/// The collapsed notch pill from artboard "1 · Collapsed (rings)": a black
-/// blob that hugs the camera housing, with the three ring clusters on the
-/// left flank, the soonest-reset countdown on the right flank, and rounded
-/// bottom corners so it reads as one shape with the physical notch. The
-/// camera gap in the middle is sized to the real notch at runtime (the
-/// preview render uses a stand-in width).
+/// The collapsed notch face, redesigned to sit *beside* the camera housing
+/// rather than straddle it: the full three-cluster strip was wider than a
+/// physical notch and spilled onto the app's Window/Help menus. Collapsed now
+/// carries only what you need at a glance — one colored dot per running agent
+/// (spinning while it works), the launcher chip, and a single severity ring for
+/// the tightest quota so a plan running dry still warns. The full breakdown
+/// (all three subscriptions, value, reset times) drops in on hover.
 public struct NotchFaceView: View {
     public let snapshot: HUDSnapshot?
     public var now: Date
-    /// Width of the physical camera housing the flanks wrap around.
-    public var cameraWidth: CGFloat
     /// Menubar/notch height on this display.
     public var height: CGFloat
+    public var onSelect: ((Agent) -> Void)?
+    public var onLaunch: (() -> Void)?
 
     public init(
         snapshot: HUDSnapshot?,
         now: Date = Date(),
-        cameraWidth: CGFloat = 160,
-        height: CGFloat = 34
+        height: CGFloat = 34,
+        onSelect: ((Agent) -> Void)? = nil,
+        onLaunch: (() -> Void)? = nil
     ) {
         self.snapshot = snapshot
         self.now = now
-        self.cameraWidth = cameraWidth
         self.height = height
+        self.onSelect = onSelect
+        self.onLaunch = onLaunch
     }
 
-    /// Each flank's width, from the approved artboard (150pt at 16pt padding).
-    public static let flankWidth: CGFloat = 150
     public static let cornerRadius: CGFloat = 14
 
-    public var totalWidth: CGFloat { cameraWidth + 2 * Self.flankWidth }
-
-    private static let order = ["claude-team", "claude-personal", "codex"]
-
-    private var orderedSubs: [Subscription] {
-        guard let snap = snapshot else { return [] }
-        return Self.order.compactMap { id in snap.subscriptions.first { $0.id == id } }
-    }
-
     public var body: some View {
-        HStack(spacing: 0) {
-            // Left flank: one 26pt three-ring cluster per subscription,
-            // brightness carrying the agents-running signal.
-            HStack(spacing: 12) {
-                if !orderedSubs.isEmpty {
-                    ForEach(orderedSubs) { sub in
-                        RingCluster(rings: sub.notchRings, diameter: 26, strokeWidth: 2)
-                            .opacity(sub.clusterOpacity)
-                    }
-                } else {
-                    ForEach(0..<3, id: \.self) { _ in
-                        RingCluster(rings: [nil, nil, nil], diameter: 26, strokeWidth: 2)
-                            .opacity(0.35)
-                    }
-                }
-                Spacer(minLength: 0)
+        HStack(spacing: 12) {
+            AgentClusterView(
+                agents: snapshot?.agents ?? [],
+                diameter: 18,
+                onSelect: onSelect,
+                onLaunch: onLaunch
+            )
+            // A single severity ring for the tightest quota across all plans,
+            // so a plan burning down still reads without opening the card.
+            if let worst = snapshot?.worstWindow {
+                RingCluster(rings: [worst], diameter: 16, strokeWidth: 2)
             }
-            .padding(.leading, 16)
-            .frame(width: Self.flankWidth)
-
-            // Camera housing gap. The dot is a subtle hint in previews; on the
-            // real display it sits behind the physical camera.
-            ZStack {
-                Circle()
-                    .fill(Color(hex: 0x121316))
-                    .frame(width: 10, height: 10)
-            }
-            .frame(width: cameraWidth)
-
-            // Right flank: the live-agent strip, right-aligned — one colored
-            // dot per running agent (spinning while it works, amber pip when it
-            // needs you, dim when idle) plus the launcher chip. This replaces
-            // the countdown, so any motion on the right means work is happening.
-            HStack(spacing: 0) {
-                Spacer(minLength: 0)
-                AgentClusterView(
-                    agents: snapshot?.agents ?? [],
-                    diameter: 18,
-                    onSelect: { AppActions.jumpToAgent($0) },
-                    onLaunch: { AppActions.openLauncher() }
-                )
-            }
-            .padding(.trailing, 16)
-            .frame(width: Self.flankWidth)
         }
-        .frame(width: totalWidth, height: height)
+        .padding(.horizontal, 14)
+        .frame(height: height)
         .background(
             UnevenRoundedRectangle(
                 cornerRadii: .init(
@@ -99,24 +60,28 @@ public struct NotchFaceView: View {
     }
 }
 
-/// The hover/expanded state from artboard "2 · Expanded (hover)": the notch
-/// pill stays put and the full card hangs directly below it, centered.
+/// The hover/expanded state: the compact face stays put and the full card hangs
+/// directly below it. This is the only place the three subscription clusters,
+/// value, and reset times appear now.
 public struct NotchExpandedView: View {
     public let snapshot: HUDSnapshot?
     public var now: Date
-    public var cameraWidth: CGFloat
     public var faceHeight: CGFloat
+    public var onSelect: ((Agent) -> Void)?
+    public var onLaunch: (() -> Void)?
 
     public init(
         snapshot: HUDSnapshot?,
         now: Date = Date(),
-        cameraWidth: CGFloat = 160,
-        faceHeight: CGFloat = 34
+        faceHeight: CGFloat = 34,
+        onSelect: ((Agent) -> Void)? = nil,
+        onLaunch: (() -> Void)? = nil
     ) {
         self.snapshot = snapshot
         self.now = now
-        self.cameraWidth = cameraWidth
         self.faceHeight = faceHeight
+        self.onSelect = onSelect
+        self.onLaunch = onLaunch
     }
 
     public var body: some View {
@@ -124,8 +89,9 @@ public struct NotchExpandedView: View {
             NotchFaceView(
                 snapshot: snapshot,
                 now: now,
-                cameraWidth: cameraWidth,
-                height: faceHeight
+                height: faceHeight,
+                onSelect: onSelect,
+                onLaunch: onLaunch
             )
             PopoverCard(snapshot: snapshot, now: now)
         }

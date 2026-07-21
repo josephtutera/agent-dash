@@ -109,12 +109,25 @@ final class NotchTests: XCTestCase {
         XCTAssertFalse(agent(pid: 1, state: "working").isIdle)
     }
 
-    // MARK: - Notch face geometry
+    // MARK: - Compact-face worst-quota ring
 
-    @MainActor
-    func testNotchFaceWidthWrapsCamera() {
-        let face = NotchFaceView(snapshot: nil, cameraWidth: 200)
-        XCTAssertEqual(face.totalWidth, 200 + 2 * NotchFaceView.flankWidth)
+    private func subWithTightest(_ pct: Int?) -> Subscription {
+        Subscription(id: "s\(pct ?? -1)", provider: "claude", label: "S",
+                     windows: [], tightest: Window(kind: "session_5h", pctLeft: pct, resetsAt: nil, pace: nil),
+                     stale: nil, activeAgents: 0)
+    }
+
+    func testWorstWindowIsTightestAcrossSubscriptions() {
+        let snap = HUDSnapshot(version: 1, generatedAt: nil,
+                               subscriptions: [subWithTightest(60), subWithTightest(8), subWithTightest(90)],
+                               agents: [], value: nil, soonestReset: nil)
+        XCTAssertEqual(snap.worstWindow?.pctLeft, 8)
+    }
+
+    func testWorstWindowNilWhenNoSubsReportTightest() {
+        let snap = HUDSnapshot(version: 1, generatedAt: nil, subscriptions: [],
+                               agents: [], value: nil, soonestReset: nil)
+        XCTAssertNil(snap.worstWindow)
     }
 
     // MARK: - Render smoke test
