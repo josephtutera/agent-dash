@@ -7,3 +7,5 @@ __pycache__/
 build/
 dist/
 *.egg-info/
+# deps are pinned in pyproject.toml; the uv lockfile is incidental here
+uv.lock
