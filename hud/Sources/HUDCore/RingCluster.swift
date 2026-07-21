@@ -57,12 +57,12 @@ public struct RingCluster: View {
     }
 }
 
-/// The menu-bar status-item content: the glance. One colored dot per running
-/// agent (spinning while it works, amber pip when it needs you, dim when idle)
-/// followed by a single severity ring for the tightest quota, so a plan running
-/// dry still warns. Clicking the item opens the full card. Offline collapses to
-/// one dim ring. The dots here are non-interactive — the whole status item is
-/// one click target — so they carry no tap gestures.
+/// The menu-bar status-item content: one ring cluster per subscription (Team,
+/// Personal, Codex), each with its provider mark beside it — the Claude spark or
+/// the Codex knot — so you can tell the plans apart at a glance. Each cluster is
+/// the session ring outside, the tightest weekly inside, severity-colored, so a
+/// plan running dry reads without opening the card. Clicking the item opens the
+/// full card. Offline collapses to three dim rings.
 public struct MenuBarContentView: View {
     public let snapshot: HUDSnapshot?
     public var now: Date
@@ -72,22 +72,27 @@ public struct MenuBarContentView: View {
         self.now = now
     }
 
-    private var agents: [Agent] {
-        (snapshot?.agents ?? []).sorted { $0.pid < $1.pid }
+    // Fixed presentation order regardless of daemon ordering.
+    private static let order = ["claude-team", "claude-personal", "codex"]
+
+    private var orderedSubs: [Subscription] {
+        guard let snap = snapshot else { return [] }
+        return Self.order.compactMap { id in snap.subscriptions.first { $0.id == id } }
     }
 
     public var body: some View {
-        HStack(spacing: 7) {
-            if let snap = snapshot {
-                let colors = AgentColors.assign(snap.agents)
-                ForEach(agents) { agent in
-                    AgentDot(agent: agent, color: colors[agent.pid] ?? Theme.muted, diameter: 16)
-                }
-                if let worst = snap.worstWindow {
-                    RingCluster(rings: [worst], diameter: 16, strokeWidth: 2)
+        HStack(spacing: 11) {
+            if !orderedSubs.isEmpty {
+                ForEach(orderedSubs) { sub in
+                    HStack(spacing: 4) {
+                        BrandMark(provider: sub.provider, size: 12)
+                        RingCluster(rings: sub.miniRings, diameter: 18, strokeWidth: 2)
+                    }
                 }
             } else {
-                RingCluster(session: nil, weekly: nil, diameter: 16).opacity(0.35)
+                ForEach(0..<3, id: \.self) { _ in
+                    RingCluster(session: nil, weekly: nil, diameter: 18).opacity(0.35)
+                }
             }
         }
         .padding(.horizontal, 5)
