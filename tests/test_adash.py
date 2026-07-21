@@ -318,7 +318,9 @@ def test_app_new_session_opens_warp_tab(tmp_path: Path, monkeypatch: pytest.Monk
 def test_banner_art_picks_a_font_that_fits():
     import pyfiglet
 
-    arts = [pyfiglet.figlet_format(app_module.BANNER_TEXT, font=f).rstrip() for f in app_module.BANNER_FONTS]
+    trim = app_module._trim_descenders
+    arts = [trim(pyfiglet.figlet_format(app_module.BANNER_TEXT, font=f).rstrip())
+            for f in app_module.BANNER_FONTS]
     widths = [max(len(line) for line in art.splitlines()) for art in arts]
 
     assert widths == sorted(widths, reverse=True), "BANNER_FONTS must be widest-first"
@@ -326,6 +328,26 @@ def test_banner_art_picks_a_font_that_fits():
     assert app_module._banner_art(widths[0] - 1) == arts[1]
     assert app_module._banner_art(widths[-1]) == arts[-1]
     assert app_module._banner_art(widths[-1] - 1) == ""  # nothing fits: plain-text fallback
+
+
+def test_banner_trims_the_orphan_g_descender():
+    import pyfiglet
+
+    # figlet slant hangs the lowercase-g tail on its own sparse line below the
+    # word; the banner must sit on its dense baseline instead of that orphan
+    raw = pyfiglet.figlet_format(app_module.BANNER_TEXT, font="slant").rstrip()
+    raw_lines = raw.split("\n")
+
+    def ink(line: str) -> int:
+        return len(line.replace(" ", ""))
+
+    assert ink(raw_lines[-1]) * 3 < max(ink(l) for l in raw_lines), "fixture: last line is a sparse tail"
+    trimmed = app_module._trim_descenders(raw).split("\n")
+    assert len(trimmed) == len(raw_lines) - 1  # the orphan descender line is gone
+    assert ink(trimmed[-1]) > ink(raw_lines[-1])  # new bottom is the dense baseline
+    # a block with no descender tail is left exactly as-is
+    solid = "\n".join(["#####", "#   #", "#####"])
+    assert app_module._trim_descenders(solid) == solid
 
 
 def test_boot_sweep_pegs_then_settles_to_true():

@@ -15,6 +15,7 @@ from rich.text import Text
 from textual import events, on, work
 from textual.app import App, ComposeResult
 from textual.binding import Binding
+from textual.css.query import NoMatches
 from textual.widgets import DataTable, Footer, Input, Static
 
 from activity import enrich
@@ -58,6 +59,22 @@ BOOT_SWEEP_SECONDS = 0.85
 _BOOT_PEAK = 0.55  # fraction of the sweep spent rising to the peg before settling
 
 
+def _trim_descenders(art: str) -> str:
+    """Drop trailing figlet lines that are just a descender tail — the hanging
+    "/____/" that slant leaves under a lowercase g/y/p. Without this the banner
+    shows an orphaned fragment floating below the word; trimming lets it sit
+    cleanly on its baseline. Stops at the first dense (full-height) line."""
+    lines = art.split("\n")
+    body = max((len(line.replace(" ", "")) for line in lines), default=0)
+    while len(lines) > 1:
+        ink = len(lines[-1].replace(" ", ""))
+        if ink == 0 or ink * 3 < body:  # blank, or well under the densest line
+            lines.pop()
+        else:
+            break
+    return "\n".join(lines)
+
+
 def _banner_art(width: int) -> str:
     """Figlet art for the banner that fits in `width` columns, or "" when no
     font does. Art that is even one column too wide gets word-wrapped by the
@@ -66,7 +83,7 @@ def _banner_art(width: int) -> str:
         import pyfiglet
 
         for font in BANNER_FONTS:
-            art = pyfiglet.figlet_format(BANNER_TEXT, font=font).rstrip()
+            art = _trim_descenders(pyfiglet.figlet_format(BANNER_TEXT, font=font).rstrip())
             if art and max(len(line) for line in art.splitlines()) <= width:
                 return art
     except Exception:
@@ -500,7 +517,12 @@ class AdashApp(App):
 
     def _advance_boot(self, step: float) -> None:
         self._boot = min(1.0, self._boot + step / BOOT_SWEEP_SECONDS)
-        self._render_usage()
+        try:
+            self._render_usage()
+        except NoMatches:
+            # the app is tearing down and the panel is already gone; the 30fps
+            # tick can outlive the widget tree, so stop sweeping instead of raising
+            self._boot = 1.0
         if self._boot >= 1.0 and self._boot_timer is not None:
             self._boot_timer.stop()
             self._boot_timer = None
