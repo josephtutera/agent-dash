@@ -1,23 +1,26 @@
 import AppKit
 import HUDCore
 
-// Entry point. Two modes:
-//   adash-hud                          -> run the menubar app
-//   adash-hud --render-preview out.png -> render the card to a PNG and exit
-// The preview mode is how reviewers (and CI) see the UI without a menubar.
+// Entry point. Three modes:
+//   adash-hud                                -> run the HUD (notch or menubar)
+//   adash-hud --render-preview out.png       -> render the card to a PNG and exit
+//   adash-hud --render-preview-notch out.png -> render the notch pill (collapsed
+//                                               and hover-expanded) and exit
+// The preview modes are how reviewers (and CI) see the UI without a menubar.
 
 let args = CommandLine.arguments
 
-if let flagIndex = args.firstIndex(of: "--render-preview") {
-    let outPath = args.indices.contains(flagIndex + 1) ? args[flagIndex + 1] : "preview.png"
+func runRender(_ flag: String, defaultName: String, render: @MainActor (URL) throws -> Void) {
+    guard let flagIndex = args.firstIndex(of: flag) else { return }
+    let outPath = args.indices.contains(flagIndex + 1) ? args[flagIndex + 1] : defaultName
     let url = URL(fileURLWithPath: outPath)
     // ImageRenderer needs the AppKit machinery initialized, but not a full run
     // loop. Touch the shared application, then render on the main actor.
     _ = NSApplication.shared
     NSApp.setActivationPolicy(.prohibited)
     do {
-        _ = try MainActor.assumeIsolated {
-            try PreviewRenderer.renderCardPNG(to: url, scale: 2)
+        try MainActor.assumeIsolated {
+            try render(url)
         }
         FileHandle.standardError.write(Data("rendered preview to \(url.path)\n".utf8))
         exit(0)
@@ -25,6 +28,13 @@ if let flagIndex = args.firstIndex(of: "--render-preview") {
         FileHandle.standardError.write(Data("preview render failed: \(error)\n".utf8))
         exit(1)
     }
+}
+
+runRender("--render-preview", defaultName: "preview.png") { url in
+    try PreviewRenderer.renderCardPNG(to: url, scale: 2)
+}
+runRender("--render-preview-notch", defaultName: "preview-notch.png") { url in
+    try PreviewRenderer.renderNotchPNG(to: url, scale: 2)
 }
 
 MainActor.assumeIsolated {

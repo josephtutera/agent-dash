@@ -6,6 +6,7 @@ import SwiftUI
 extension Window {
     public var isSession: Bool { kind == "session_5h" }
     public var isWeekly: Bool { kind.hasPrefix("weekly") }
+    public var isFable: Bool { kind == "weekly_fable" }
     public var isLimitReached: Bool { (pctLeft ?? 100) <= 0 }
 }
 
@@ -18,6 +19,35 @@ extension Subscription {
     /// Inner ring source: the first weekly window (7d, or Fable for that sub).
     public var weeklyWindow: Window? {
         windows.first { $0.isWeekly }
+    }
+
+    /// The plain weekly window (Claude `weekly_7d`, Codex `weekly`), never Fable.
+    public var weekly7dWindow: Window? {
+        windows.first { $0.isWeekly && !$0.isFable }
+    }
+
+    /// The model-scoped Fable weekly window, if this subscription has one.
+    public var fableWindow: Window? {
+        windows.first { $0.isFable }
+    }
+
+    /// The notch-face cluster rings, outer to inner: 5h session, weekly, then
+    /// Fable when the subscription reports one (Codex clusters get two rings).
+    public var notchRings: [Window?] {
+        var rings: [Window?] = [sessionWindow, weekly7dWindow]
+        if let fable = fableWindow { rings.append(fable) }
+        return rings
+    }
+
+    /// The menubar mini rings: 5h session outside, the tightest weekly inside,
+    /// so a pressured Fable limit still reads at the 18pt scale where a third
+    /// ring would be too small to draw.
+    public var miniRings: [Window?] {
+        let weeklies = windows.filter { $0.isWeekly }
+        let tightestWeekly = weeklies.min { a, b in
+            (a.pctLeft ?? 101) < (b.pctLeft ?? 101)
+        }
+        return [sessionWindow, tightestWeekly ?? weeklyWindow]
     }
 
     public var isIdle: Bool { activeAgents <= 0 }

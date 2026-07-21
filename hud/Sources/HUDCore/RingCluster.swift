@@ -1,28 +1,41 @@
 import SwiftUI
 
-/// One mini concentric ring cluster: outer ring = 5h session, inner ring =
-/// weekly. Each ring fills by the consumed fraction of its limit, colored by
-/// severity, drawn round-capped over a hairline track. A fully spent limit
-/// therefore renders as a complete solid ring.
+/// One concentric ring cluster, outermost ring first. Each ring fills by the
+/// consumed fraction of its window, colored by severity, drawn round-capped
+/// over a hairline track. A fully spent limit therefore renders as a complete
+/// solid ring. The two faces use the same view at different scales:
+///   menubar mini: [session, weekly] at 18pt
+///   notch face:   [session, weekly, fable] at 26pt (Codex has no fable ring)
 public struct RingCluster: View {
-    public let session: Window?
-    public let weekly: Window?
+    public let rings: [Window?]
     public var diameter: CGFloat = 18
     public var strokeWidth: CGFloat = 2
 
-    public init(session: Window?, weekly: Window?, diameter: CGFloat = 18, strokeWidth: CGFloat = 2) {
-        self.session = session
-        self.weekly = weekly
+    public init(rings: [Window?], diameter: CGFloat = 18, strokeWidth: CGFloat = 2) {
+        self.rings = rings
         self.diameter = diameter
         self.strokeWidth = strokeWidth
     }
 
+    /// The original two-ring form used by the menubar mini and offline states.
+    public init(session: Window?, weekly: Window?, diameter: CGFloat = 18, strokeWidth: CGFloat = 2) {
+        self.init(rings: [session, weekly], diameter: diameter, strokeWidth: strokeWidth)
+    }
+
     public var body: some View {
         ZStack {
-            ring(for: session, inset: 0)
-            ring(for: weekly, inset: strokeWidth + 1.5)
+            ForEach(Array(rings.enumerated()), id: \.offset) { index, window in
+                ring(for: window, inset: inset(at: index))
+            }
         }
         .frame(width: diameter, height: diameter)
+    }
+
+    /// Ring spacing from the approved artboards: at stroke 2 the radii step by
+    /// 3pt per ring (26pt cluster: r 11/8/5; 18pt cluster: r 7/4), i.e. one
+    /// stroke off the frame edge, then a stroke-and-a-point per level inward.
+    private func inset(at index: Int) -> CGFloat {
+        strokeWidth + CGFloat(index) * (strokeWidth + 1)
     }
 
     @ViewBuilder
@@ -68,7 +81,7 @@ public struct MenuBarContentView: View {
         HStack(spacing: 5) {
             if let snap = snapshot, !orderedSubs.isEmpty {
                 ForEach(orderedSubs) { sub in
-                    RingCluster(session: sub.sessionWindow, weekly: sub.weeklyWindow)
+                    RingCluster(rings: sub.miniRings)
                         .opacity(sub.clusterOpacity)
                 }
                 if let soonest = snap.soonestReset {

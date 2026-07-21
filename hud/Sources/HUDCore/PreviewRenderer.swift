@@ -28,9 +28,39 @@ public enum PreviewRenderer {
             .padding(20)
             .background(Theme.notch)
 
+        return try write(content, to: url, scale: scale, opaque: true)
+    }
+
+    /// Renders the notch face over a desktop-gray backdrop, collapsed and
+    /// expanded stacked in one image, so reviewers see both hover states of
+    /// the notch pill without a notched Mac.
+    @discardableResult
+    public static func renderNotchPNG(
+        snapshot: HUDSnapshot = .sample,
+        now: Date = HUDSnapshot.previewNow,
+        to url: URL,
+        scale: CGFloat = 2
+    ) throws -> URL {
+        let content = VStack(alignment: .center, spacing: 40) {
+            NotchFaceView(snapshot: snapshot, now: now)
+            NotchExpandedView(snapshot: snapshot, now: now)
+        }
+        .padding(.horizontal, 60)
+        .padding(.bottom, 40)
+        .background(Color(hex: 0x1C1D21)) // --color-desktop from the artboards
+
+        return try write(content, to: url, scale: scale, opaque: true)
+    }
+
+    private static func write(
+        _ content: some View,
+        to url: URL,
+        scale: CGFloat,
+        opaque: Bool
+    ) throws -> URL {
         let renderer = ImageRenderer(content: content)
         renderer.scale = scale
-        renderer.isOpaque = true
+        renderer.isOpaque = opaque
 
         guard let cgImage = renderer.cgImage else {
             throw RenderError(description: "ImageRenderer produced no image")

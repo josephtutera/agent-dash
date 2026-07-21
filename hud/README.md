@@ -1,10 +1,29 @@
 # AgentDashHUD
 
-A native macOS menubar app (Phase 3 of the agent-dash HUD program) that renders
+A native macOS HUD (Phases 3 and 4 of the agent-dash HUD program) that renders
 the live state of your AI subscriptions and running coding agents. It is the
-menubar face for the `adash serve` daemon: a dark instrument-cluster readout of
-how much of each limit you have left, which agents need you, and what all that
-usage would cost at API rates.
+on-screen face for the `adash serve` daemon: a dark instrument-cluster readout
+of how much of each limit you have left, which agents need you, and what all
+that usage would cost at API rates.
+
+It wears one of two faces, decided automatically from the display arrangement:
+
+- **Notch mode** — when the built-in display is the only display and has a
+  notch, a black pill hugs the camera housing: one 26pt concentric ring cluster
+  per subscription on the left (outer ring 5h session, middle weekly, inner
+  Fable; Codex has two rings), the soonest-reset countdown on the right, and
+  cluster brightness carrying the agents-running signal. Hovering the pill
+  hangs the full detail card below the notch; moving away collapses it.
+- **Menubar mode** — whenever an external display is attached (or the lid is
+  closed, or the built-in panel has no notch), the pill gives way to an
+  NSStatusItem with 18pt two-ring mini clusters (inner ring = the tightest
+  weekly) plus the countdown; clicking opens the same card as a panel. A fake
+  notch is never drawn on an external display.
+
+The switch re-evaluates on every display-configuration change, rebuilding the
+notch window rather than moving it. The notch panel deliberately stays out of
+fullscreen spaces (no `.fullScreenAuxiliary`), and its window is sized exactly
+to the drawn pill so it never steals clicks meant for menubar items.
 
 This is a pure SwiftPM package with no third-party dependencies. macOS 14+,
 Swift 5.9+.
@@ -46,10 +65,12 @@ without running the menubar:
 
 ```sh
 swift run adash-hud --render-preview preview.png
+swift run adash-hud --render-preview-notch preview-notch.png
 ```
 
-The committed `preview.png` is generated this way. The same render path is
-exercised by `RenderTests` as a layout smoke test.
+The committed `preview.png` (the card) and `preview-notch.png` (the notch pill,
+collapsed and hover-expanded) are generated this way. The same render paths are
+exercised by `RenderTests` and `NotchTests` as layout smoke tests.
 
 ## Tests
 
@@ -65,15 +86,16 @@ test.
 ## Architecture
 
 - `HUDCore` (library): the Codable contract structs, the theme tokens, the pure
-  formatting helpers, the SwiftUI views (ring cluster, brand marks, popover
-  card), the polling `HUDStore`, and the preview renderer. Everything testable
-  lives here.
-- `adash-hud` (executable): a thin AppKit shell. It wires an `NSStatusItem`
-  hosting the ring-cluster view to a non-activating `NSPanel` that shows the
-  card on click, and handles the `--render-preview` flag.
+  formatting helpers, the SwiftUI views (ring cluster, notch face, brand marks,
+  popover card), the display-mode policy, the polling `HUDStore`, and the
+  preview renderer. Everything testable lives here.
+- `adash-hud` (executable): a thin AppKit shell. It applies `ModePolicy` on
+  launch and on display changes, wiring either the `NSStatusItem` +
+  click-to-open panel (menubar mode) or the `NotchController`'s hover-expanding
+  pill panel (notch mode), and handles the `--render-preview*` flags.
 
-## Notch mode is Phase 4
+## Still to come (Phase 5 polish)
 
-This phase is the menubar item plus click-to-open card. The notch-hugging
-always-on display, the row click-to-focus action, and the real "open agent dash"
-target (currently a `open -a Warp` placeholder) all land in Phase 4.
+The row click-to-focus action (jump to that agent's Warp tab), the real
+"open agent dash" target (currently an `open -a Warp` placeholder), a quit
+affordance, and expand/collapse animation on the notch pill.

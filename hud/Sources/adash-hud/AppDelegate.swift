@@ -2,23 +2,27 @@ import AppKit
 import SwiftUI
 import HUDCore
 
-/// Wires an NSStatusItem (hosting the ring cluster view) to a non-activating
-/// panel that shows the card on click. The store drives both; SwiftUI observes
-/// it, so the menubar content and the card update in place every poll.
+/// Wires the two faces of the HUD to one store. In menubar mode an
+/// NSStatusItem hosts the mini ring clusters and clicking it opens the card
+/// panel. In notch mode (built-in display is the sole display and has a
+/// notch) the status item hides and a NotchController draws the pill over the
+/// camera housing instead, expanding to the same card on hover. The mode is
+/// re-decided from ModePolicy on every display-configuration change, and the
+/// notch window is rebuilt rather than moved.
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
     private let store = HUDStore()
     private var statusItem: NSStatusItem!
     private var panel: NSPanel?
     private var hostingView: NSHostingView<AnyView>!
+    private var notchController: NotchController!
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         store.start()
+        notchController = NotchController(store: store)
 
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
 
-        let menuContent = MenuBarContentView(snapshot: nil)
-            .environmentObject(store)
         // Wrap so the hosting view observes the store and resizes to content.
         let root = MenuBarHost().environmentObject(store)
         hostingView = NSHostingView(rootView: AnyView(root))
@@ -35,12 +39,41 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             button.target = self
             button.action = #selector(togglePanel)
         }
-        _ = menuContent // silence unused in case of future direct use
+
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(displaysChanged),
+            name: NSApplication.didChangeScreenParametersNotification,
+            object: nil
+        )
+        applyMode()
     }
 
     func applicationWillTerminate(_ notification: Notification) {
         store.stop()
+        notchController.hide()
     }
+
+    // MARK: - Mode switching
+
+    @objc private func displaysChanged() {
+        applyMode()
+    }
+
+    private func applyMode() {
+        let displays = NSScreen.screens.map(\.displayInfo)
+        let mode = ModePolicy.mode(for: displays)
+        if mode == .notch, let builtIn = NSScreen.screens.first(where: \.isBuiltIn) {
+            statusItem.isVisible = false
+            panel?.orderOut(nil)
+            notchController.show(on: builtIn)
+        } else {
+            notchController.hide()
+            statusItem.isVisible = true
+        }
+    }
+
+    // MARK: - Menubar card panel
 
     @objc private func togglePanel() {
         if let panel, panel.isVisible {
