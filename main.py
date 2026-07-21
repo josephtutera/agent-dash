@@ -14,7 +14,7 @@ from collectors import collect_all
 from models import fmt_tokens, rel_time, resume_command
 
 # shown as the Warp tab title while the TUI runs, instead of the raw "adash" command
-TAB_TITLE = "◆ JosephCode"
+TAB_TITLE = "◆ Agent Dash"
 
 
 def set_tab_title(title: str) -> None:

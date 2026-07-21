@@ -77,6 +77,12 @@ async def main() -> None:
             await pilot.pause(0.1)
             if app.sessions and app.usages and app.running:
                 break
+        # let the boot self-test sweep finish so the hero shows the resting
+        # dashboard (true readings), not a mid-sweep frame with pegged gauges
+        for _ in range(30):
+            if app._boot >= 1.0:
+                break
+            await pilot.pause(0.1)
         await pilot.pause(0.3)
         out = Path(__file__).parent.parent / "adash.svg"
         app.save_screenshot(str(out))
