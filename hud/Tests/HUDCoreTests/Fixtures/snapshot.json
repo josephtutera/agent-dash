@@ -1,0 +1,113 @@
+{
+  "version": 1,
+  "generated_at": "2026-07-21T13:41:00Z",
+  "subscriptions": [
+    {
+      "id": "claude-team",
+      "provider": "claude",
+      "label": "Claude Team",
+      "windows": [
+        {
+          "kind": "session_5h",
+          "pct_left": 18,
+          "resets_at": "2026-07-21T15:47:00Z",
+          "pace": { "projected_dry_at": "2026-07-21T14:22:00Z", "margin_seconds": 5100 }
+        },
+        {
+          "kind": "weekly_7d",
+          "pct_left": 61,
+          "resets_at": "2026-07-25T16:41:00Z",
+          "pace": null
+        }
+      ],
+      "tightest": {
+        "kind": "session_5h",
+        "pct_left": 18,
+        "resets_at": "2026-07-21T15:47:00Z"
+      },
+      "stale": null,
+      "active_agents": 2
+    },
+    {
+      "id": "claude-personal",
+      "provider": "claude",
+      "label": "Claude Personal",
+      "windows": [
+        { "kind": "session_5h", "pct_left": 74, "resets_at": "2026-07-21T14:53:00Z", "pace": null },
+        { "kind": "weekly_7d", "pct_left": 88, "resets_at": "2026-07-26T13:41:00Z", "pace": null },
+        { "kind": "weekly_fable", "pct_left": 0, "resets_at": "2026-07-23T19:41:00Z", "pace": null }
+      ],
+      "tightest": {
+        "kind": "weekly_fable",
+        "pct_left": 0,
+        "resets_at": "2026-07-23T19:41:00Z"
+      },
+      "stale": null,
+      "active_agents": 0
+    },
+    {
+      "id": "codex",
+      "provider": "codex",
+      "label": "Codex Max",
+      "windows": [
+        { "kind": "session_5h", "pct_left": 52, "resets_at": "2026-07-21T14:19:00Z", "pace": null },
+        { "kind": "weekly", "pct_left": 43, "resets_at": "2026-07-24T21:41:00Z", "pace": null }
+      ],
+      "tightest": {
+        "kind": "session_5h",
+        "pct_left": 52,
+        "resets_at": "2026-07-21T14:19:00Z"
+      },
+      "stale": null,
+      "active_agents": 1
+    }
+  ],
+  "agents": [
+    {
+      "pid": 4821,
+      "tool": "claude",
+      "project": "prototype-ehr",
+      "cwd": "/Users/j/prototype-ehr",
+      "state": "waiting",
+      "action": "waiting on approval to run tests",
+      "since_seconds": 72,
+      "subscription_id": "claude-team"
+    },
+    {
+      "pid": 4822,
+      "tool": "claude",
+      "project": "web-app",
+      "cwd": "/Users/j/web-app",
+      "state": "working",
+      "action": "editing MeterRow.swift",
+      "since_seconds": 492,
+      "subscription_id": "claude-team"
+    },
+    {
+      "pid": 5140,
+      "tool": "codex",
+      "project": "agent-dash",
+      "cwd": "/Users/j/agent-dash",
+      "state": "working",
+      "action": "running swift build",
+      "since_seconds": 44,
+      "subscription_id": "codex"
+    }
+  ],
+  "value": {
+    "today_usd": 182.0,
+    "month_usd": 3140.0,
+    "subs_cost_usd": 250.0,
+    "multiple": 12.6,
+    "by_sub": {
+      "claude-team": { "today_usd": 120.0, "month_usd": 2100.0 },
+      "claude-personal": { "today_usd": 22.0, "month_usd": 480.0 },
+      "codex": { "today_usd": 40.0, "month_usd": 560.0 }
+    }
+  },
+  "soonest_reset": {
+    "subscription_id": "codex",
+    "kind": "session_5h",
+    "resets_at": "2026-07-21T14:19:00Z"
+  }
+}
