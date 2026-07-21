@@ -482,6 +482,51 @@ def test_title_falls_back_to_directory_when_sessions_run_out():
     assert app._title_for(a) == "proj"
 
 
+def test_claude_session_id_read_from_pid_file(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    # Claude Code writes ~/.claude/sessions/<pid>.json naming the live transcript;
+    # reading it is what lets a running agent resolve to its exact session.
+    import agents as agents_module
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    sessions_dir = tmp_path / ".claude" / "sessions"
+    sessions_dir.mkdir(parents=True)
+    (sessions_dir / "56817.json").write_text(json.dumps(
+        {"pid": 56817, "sessionId": "4b5d8bef-52fc", "status": "busy"}))
+    assert agents_module._claude_session_id_for_pid(56817) == "4b5d8bef-52fc"
+    assert agents_module._claude_session_id_for_pid(99999) == ""  # no file for this pid
+    (sessions_dir / "42.json").write_text("not json{")
+    assert agents_module._claude_session_id_for_pid(42) == ""  # malformed, tolerated
+
+
+def test_running_agents_tags_claude_with_its_exact_session_id(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    # end-to-end guard for the mislabel bug: a running claude agent must carry
+    # its real session id, not just its directory, so recency can't override it.
+    import agents as agents_module
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    sessions_dir = tmp_path / ".claude" / "sessions"
+    sessions_dir.mkdir(parents=True)
+    (sessions_dir / "56817.json").write_text(json.dumps({"sessionId": "sess-4b5d"}))
+
+    class _Result:
+        def __init__(self, stdout: str):
+            self.stdout = stdout
+
+    def fake_run(cmd, **kwargs):
+        if cmd[0] == "ps":
+            return _Result("56817 ttys003 05:00 claude\n")
+        if cmd[0] == "lsof":
+            return _Result("p56817\nn/Users/josephtutera/Repos/agent-dash\n")
+        return _Result("")
+
+    monkeypatch.setattr(agents_module.subprocess, "run", fake_run)
+    agents = agents_module.running_agents()
+    assert len(agents) == 1
+    assert agents[0].tool == "claude"
+    assert agents[0].session_id == "sess-4b5d"
+    assert agents[0].cwd == "/Users/josephtutera/Repos/agent-dash"
+
+
 # ---------------------------------------------------------------- tui
 
 

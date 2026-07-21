@@ -8,9 +8,11 @@ back to a session title.
 
 from __future__ import annotations
 
+import json
 import re
 import subprocess
 from dataclasses import dataclass
+from pathlib import Path
 
 _TOOL_PATTERNS = {
     "claude": re.compile(r"(?:^|\s|/)claude(?:\s|$)"),
@@ -92,6 +94,20 @@ def _cwd_for_pid(pid: int) -> str:
     return ""
 
 
+def _claude_session_id_for_pid(pid: int) -> str:
+    """Claude Code records the live transcript id for its process in
+    ~/.claude/sessions/<pid>.json, so a running claude agent maps to its exact
+    session instead of being guessed at from the working directory (which fails
+    the moment a repo has more than one claude session, as most do)."""
+    path = Path.home() / ".claude" / "sessions" / f"{pid}.json"
+    try:
+        data = json.loads(path.read_text())
+    except (OSError, ValueError):
+        return ""
+    session_id = data.get("sessionId")
+    return session_id if isinstance(session_id, str) else ""
+
+
 def running_agents() -> list[RunningAgent]:
     try:
         out = subprocess.run(
@@ -105,5 +121,7 @@ def running_agents() -> list[RunningAgent]:
     agents = _parse_ps(out.stdout)
     for agent in agents:
         agent.cwd = _cwd_for_pid(agent.pid)
+        if agent.tool == "claude":
+            agent.session_id = _claude_session_id_for_pid(agent.pid)
     agents.sort(key=lambda a: (a.tool, a.pid))
     return agents
