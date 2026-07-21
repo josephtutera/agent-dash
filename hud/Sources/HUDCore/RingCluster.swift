@@ -98,7 +98,7 @@ public struct MenuBarContentView: View {
             if !orderedSubs.isEmpty {
                 ForEach(orderedSubs) { sub in
                     HStack(spacing: 4) {
-                        BrandMark(provider: sub.provider, size: 12, tint: tint)
+                        BrandMark(provider: sub.provider, size: 15, tint: tint)
                         RingCluster(rings: sub.miniRings, diameter: 18, strokeWidth: 2, tint: tint)
                     }
                 }
