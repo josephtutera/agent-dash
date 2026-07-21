@@ -12,8 +12,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var statusItem: NSStatusItem!
     private var panel: NSPanel?
     private var hostingView: NSHostingView<AnyView>!
+    /// The daemon we spawned, if we did, so we can stop it again on quit and not
+    /// leave an orphan behind.
+    private var daemonProcess: Process?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        // Launching the app is all it takes: bring up the data daemon ourselves
+        // rather than making the user run `adash serve` in a second terminal.
+        daemonProcess = DaemonLauncher.ensureRunning()
         store.start()
 
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
@@ -40,6 +46,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationWillTerminate(_ notification: Notification) {
         store.stop()
+        // Only stop the daemon if we started it; leave a user-run one alone.
+        daemonProcess?.terminate()
     }
 
     // MARK: - Status item interaction

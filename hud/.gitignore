@@ -2,3 +2,4 @@
 *.xcodeproj
 .swiftpm/
 DerivedData/
+AgentDashHUD.app/
