@@ -772,7 +772,6 @@ def test_clear_and_undo_history(tmp_path: Path, monkeypatch: pytest.MonkeyPatch)
     monkeypatch.setattr(app_module, "collect_all", lambda limit=300: sessions)
     _stub_usage(monkeypatch)
     _stub_running(monkeypatch)
-    monkeypatch.setattr(app_module, "_cleared_file", lambda: tmp_path / "cleared-at")
 
     async def run() -> None:
         app = AdashApp(cmd_file=str(tmp_path / "cmd"))
@@ -780,14 +779,128 @@ def test_clear_and_undo_history(tmp_path: Path, monkeypatch: pytest.MonkeyPatch)
             table = app.query_one("#sessions", DataTable)
             await _wait_for_table(pilot, app)
             assert table.row_count == 3
+            assert "C clears" in (table.border_subtitle or "")
 
             await pilot.press("C")  # clear: hide everything seen so far
             await pilot.pause(0.1)
             assert table.row_count == 0
+            # the toast fades, so the border must keep advertising the way back
+            assert "u to restore" in (table.border_subtitle or "")
+            assert "(cleared)" in (table.border_title or "")
 
             await pilot.press("u")  # undo
             await pilot.pause(0.1)
             assert table.row_count == 3
+            assert "C clears" in (table.border_subtitle or "")
+
+    asyncio.run(run())
+
+
+def test_clear_history_does_not_persist_across_launches(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    # An accidental C used to write a marker to disk and reload it on every
+    # launch, hiding history forever. Clearing must be scoped to the live run:
+    # a fresh app always starts with the full history visible.
+    monkeypatch.setattr(app_module, "collect_all", lambda limit=300: _fake_sessions())
+    _stub_usage(monkeypatch)
+    _stub_running(monkeypatch)
+
+    async def run() -> None:
+        first = AdashApp(cmd_file=str(tmp_path / "cmd"))
+        async with first.run_test(size=(110, 32)) as pilot:
+            await _wait_for_table(pilot, first)
+            await pilot.press("C")
+            await pilot.pause(0.1)
+            assert first.cleared_at is not None
+
+        # a brand-new instance (as if adash were relaunched) is never cleared
+        second = AdashApp(cmd_file=str(tmp_path / "cmd"))
+        assert second.cleared_at is None
+        async with second.run_test(size=(110, 32)) as pilot:
+            await _wait_for_table(pilot, second)
+            assert second.query_one("#sessions", DataTable).row_count == 2
+
+    asyncio.run(run())
+
+
+def test_active_panel_sits_below_the_new_session_selector(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    # active-now renders under the launcher/picker so the visual order matches
+    # the keyboard chain (launch -> picker -> active -> history).
+    monkeypatch.setattr(app_module, "collect_all", lambda limit=300: _fake_sessions())
+    _stub_usage(monkeypatch)
+    _stub_running(monkeypatch)
+
+    async def run() -> None:
+        app = AdashApp(cmd_file=str(tmp_path / "cmd"))
+        async with app.run_test(size=(110, 32)) as pilot:
+            await _wait_for_table(pilot, app)
+            launch_y = app.query_one("#launch").region.y
+            picker_y = app.query_one("#picker").region.y
+            active_y = app.query_one("#active").region.y
+            sessions_y = app.query_one("#sessions").region.y
+            assert launch_y < picker_y < active_y < sessions_y
+
+    asyncio.run(run())
+
+
+def test_history_auto_refresh_shows_new_sessions(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    # the session list used to load once at startup; a session started (or the
+    # one you're in) never appeared without a manual r. It must poll and update.
+    monkeypatch.setattr(app_module, "HISTORY_POLL_SECONDS", 0.2)
+    state = {"sessions": _fake_sessions()}
+    monkeypatch.setattr(app_module, "collect_all", lambda limit=300: list(state["sessions"]))
+    _stub_usage(monkeypatch)
+    _stub_running(monkeypatch)
+
+    async def run() -> None:
+        app = AdashApp(cmd_file=str(tmp_path / "cmd"))
+        async with app.run_test(size=(110, 32)) as pilot:
+            table = app.query_one("#sessions", DataTable)
+            await _wait_for_table(pilot, app)
+            assert table.row_count == 2
+
+            newer = Session(tool="claude", id="new", title="Brand new", project_dir="/tmp",
+                            last_active=datetime.now(timezone.utc), tokens=1, n_messages=1,
+                            first_prompt="just started")
+            state["sessions"] = [newer] + _fake_sessions()
+            for _ in range(60):
+                await pilot.pause(0.05)
+                if table.row_count == 3:
+                    break
+            assert table.row_count == 3
+
+    asyncio.run(run())
+
+
+def test_history_refresh_preserves_selected_session(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    # a background refresh rebuilds the table; if a new row lands on top it must
+    # not drag the cursor onto a different session than the one you had selected.
+    monkeypatch.setattr(app_module, "HISTORY_POLL_SECONDS", 0.2)
+    state = {"sessions": _fake_sessions()}  # [abc (claude), xyz (codex)]
+    monkeypatch.setattr(app_module, "collect_all", lambda limit=300: list(state["sessions"]))
+    _stub_usage(monkeypatch)
+    _stub_running(monkeypatch)  # no running agents: chain is launch -> picker -> history
+
+    async def run() -> None:
+        app = AdashApp(cmd_file=str(tmp_path / "cmd"))
+        async with app.run_test(size=(110, 32)) as pilot:
+            table = app.query_one("#sessions", DataTable)
+            await _wait_for_table(pilot, app)
+            for _ in range(4):  # launch -> picker[0] -> picker[1] -> "other" -> history
+                await pilot.press("down")
+                await pilot.pause(0.05)
+            assert app.zone == "history"
+            assert app.filtered[table.cursor_row].id == "abc"
+
+            newer = Session(tool="claude", id="new", title="Brand new", project_dir="/tmp",
+                            last_active=datetime.now(timezone.utc), tokens=1, n_messages=1,
+                            first_prompt="just started")
+            state["sessions"] = [newer] + _fake_sessions()
+            for _ in range(60):
+                await pilot.pause(0.05)
+                if table.row_count == 3:
+                    break
+            assert table.row_count == 3
+            assert app.filtered[table.cursor_row].id == "abc"  # still on the same session
 
     asyncio.run(run())
 

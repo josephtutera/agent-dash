@@ -47,6 +47,11 @@ LAUNCH_TOOLS = ("claude", "codex", "opencode", "terminal")
 # braille spinner frames for the "working" indicator, like the CLIs themselves
 _SPINNER = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
 ACTIVE_POLL_SECONDS = 2.0  # live activity refresh (cheap: file reads + one ps)
+# History refresh. The session list is read from local files (mtime-cached in
+# collectors, so re-scans are cheap), but it used to load only once at startup,
+# which meant a session you just started, or the one you're sitting in, never
+# showed up until you hit r. Poll it on a gentle loop so history stays current.
+HISTORY_POLL_SECONDS = 10.0
 # Usage refresh. Claude hits a rate-limited API once per account here, and every
 # running Claude Code session polls the same endpoint against the same quota, so
 # this stays slow on purpose: the 5h/7d bars move far too gradually to be worth
@@ -291,33 +296,6 @@ def _write_tab_config(tool: str, cwd: str, configs_dir: Path, suffix: str = "", 
     return stem
 
 
-# ---------------------------------------------------------------- cleared-history marker
-
-
-def _cleared_file() -> Path:
-    return Path.home() / ".cache" / "adash" / "cleared-at"
-
-
-def _load_cleared() -> datetime | None:
-    try:
-        text = _cleared_file().read_text().strip()
-        return datetime.fromisoformat(text) if text else None
-    except (OSError, ValueError):
-        return None
-
-
-def _save_cleared(value: datetime | None) -> None:
-    try:
-        path = _cleared_file()
-        path.parent.mkdir(parents=True, exist_ok=True)
-        if value is None:
-            path.unlink(missing_ok=True)
-        else:
-            path.write_text(value.isoformat())
-    except OSError:
-        pass
-
-
 class _SessionsTable(DataTable):
     """History table that never takes keyboard focus.
 
@@ -446,7 +424,11 @@ class AdashApp(App):
         self.picker_opened: list[str] = []  # dirs opened this run, for footer feedback
         self._spin = 0  # spinner frame for working agents
         self.active_claude: str | None = None  # active claude plan label (multi-account)
-        self.cleared_at = _load_cleared()
+        # Clearing history only hides sessions for the current run. It used to
+        # persist to disk and reload on every launch, so an accidental C wiped
+        # the view permanently with no obvious way back — relaunching now always
+        # restores the full history.
+        self.cleared_at: datetime | None = None
         # boot self-test sweep: 1.0 means "settled" (true readings) so any render
         # before the animation shows real values; the first usage load drops it to
         # 0.0 and animates it back to 1.0, sweeping every gauge on the way up.
@@ -457,9 +439,11 @@ class AdashApp(App):
     def compose(self) -> ComposeResult:
         yield Static(id="banner")
         yield Static("loading usage…", id="usage", classes="panel")
-        yield _ActivePanel("scanning processes…", id="active", classes="panel")
         yield Static(id="launch")
         yield Static(id="picker")
+        # active-now sits below the launcher so the visual order matches the
+        # keyboard chain (launch -> picker -> active -> history) you move through.
+        yield _ActivePanel("scanning processes…", id="active", classes="panel")
         yield _SessionsTable(id="sessions", cursor_type="none", zebra_stripes=True)
         yield Input(placeholder="search titles, prompts, projects…  (esc to close)", id="search")
         yield Input(placeholder="directory path to open…  (~ ok · enter opens · esc cancels)", id="dirinput")
@@ -489,6 +473,7 @@ class AdashApp(App):
         # live activity polls fast; usage is slow (API); the spinner animates
         # locally between polls so "working" rows feel alive.
         self.set_interval(ACTIVE_POLL_SECONDS, self.load_running)
+        self.set_interval(HISTORY_POLL_SECONDS, self.load_sessions)
         self.set_interval(USAGE_POLL_SECONDS, self.load_usage)
         self.set_interval(0.12, self._animate_active)
 
@@ -577,7 +562,10 @@ class AdashApp(App):
             names = ", ".join(Path(p).name or p for p in self.picker_opened)
             footer += f"   [dim]opened: {escape(_truncate(names, 46))}[/]"
         rows.append(footer)
-        self.query_one("#picker", Static).update("\n".join(rows))
+        try:
+            self.query_one("#picker", Static).update("\n".join(rows))
+        except NoMatches:
+            pass  # a refresh landed mid-teardown; nothing to draw
 
     # ------------------------------------------------------------- selection chain
 
@@ -688,7 +676,10 @@ class AdashApp(App):
         self._render_active()
 
     def _render_active(self) -> None:
-        panel = self.query_one("#active", Static)
+        try:
+            panel = self.query_one("#active", Static)
+        except NoMatches:
+            return  # a poll fired mid-teardown; the panel is already gone
         panel.border_title = f"active now · {len(self.running)}"
         if not self.running:
             panel.update("[dim]no agent sessions running right now[/]")
@@ -919,7 +910,17 @@ class AdashApp(App):
         return True
 
     def _populate(self) -> None:
-        table = self.query_one("#sessions", DataTable)
+        try:
+            table = self.query_one("#sessions", DataTable)
+        except NoMatches:
+            return  # a refresh landed mid-teardown; nothing to draw
+        # the background refresh rebuilds this table on a timer, so remember which
+        # session the cursor was on and put it back by id — otherwise a new row
+        # arriving at the top would silently drag your selection to a different one.
+        prev_id = None
+        if self.zone == "history" and self.filtered and table.cursor_row is not None:
+            if 0 <= table.cursor_row < len(self.filtered):
+                prev_id = self.filtered[table.cursor_row].id
         table.clear()
         self.filtered = [s for s in self.sessions if self._matches(s)]
         # budget the column widths from the actual terminal width:
@@ -939,9 +940,21 @@ class AdashApp(App):
             )
         state = "cleared" if self.cleared_at else self.tool_filter
         table.border_title = f"history ({state}) · {len(self.filtered)}"
-        table.border_subtitle = "enter resumes · / searches · C clears"
+        # while cleared, the subtitle has to advertise the way back — the notify
+        # toast is gone in three seconds, so this is the only standing reminder.
+        table.border_subtitle = (
+            "press u to restore history · / searches"
+            if self.cleared_at
+            else "enter resumes · / searches · C clears"
+        )
         if self.filtered and self.zone == "history":
-            table.move_cursor(row=min(table.cursor_row or 0, len(self.filtered) - 1))
+            row = table.cursor_row or 0
+            if prev_id is not None:
+                for i, session in enumerate(self.filtered):
+                    if session.id == prev_id:
+                        row = i
+                        break
+            table.move_cursor(row=min(row, len(self.filtered) - 1))
 
     # ------------------------------------------------------------- events
 
@@ -1062,15 +1075,13 @@ class AdashApp(App):
 
     def action_clear(self) -> None:
         self.cleared_at = datetime.now(timezone.utc)
-        _save_cleared(self.cleared_at)
         self._populate()
-        self.notify("history cleared — press u to undo", timeout=3)
+        self.notify("history cleared — press u to restore", timeout=3)
 
     def action_undo(self) -> None:
         if not self.cleared_at:
             return
         self.cleared_at = None
-        _save_cleared(None)
         self._populate()
         self.notify("history restored", timeout=2)
 
