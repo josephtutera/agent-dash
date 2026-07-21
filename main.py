@@ -31,6 +31,40 @@ def set_tab_title(title: str) -> None:
     sys.stdout.flush()
 
 
+def _fmt_usd(value: float | None) -> str:
+    return f"${value:,.2f}" if value is not None else "n/a"
+
+
+def _print_value_block() -> None:
+    """Append the "value at API rates" estimate to the --usage text dump.
+
+    Every figure is what the usage would have cost à la carte at published API
+    prices, not a real bill; the multiple is month-to-date value over the
+    configured monthly subscription cost.
+    """
+    from pricing import collect_value
+
+    report = collect_value()
+
+    def row(label: str, today: float, month: float, cost: float | None, mult: float | None) -> str:
+        mult_s = f"{mult:.1f}x" if mult is not None else "—"
+        return (
+            f"{label:16}{_fmt_usd(today):>12}{_fmt_usd(month):>13}"
+            f"{_fmt_usd(cost):>11}{mult_s:>9}"
+        )
+
+    print()
+    print("VALUE  estimate at API rates, not a bill")
+    print(f"{'':16}{'today':>12}{'month':>13}{'sub/mo':>11}{'mult':>9}")
+    for sub in report.subs:
+        print(row(sub.id, sub.today_usd, sub.month_usd, sub.subs_cost_usd, sub.multiple))
+    print(row("TOTAL", report.today_total_usd, report.month_total_usd, report.subs_cost_usd, report.multiple))
+    if report.skipped_models:
+        shown = ", ".join(sorted(report.skipped_models)[:6])
+        more = "…" if len(report.skipped_models) > 6 else ""
+        print(f"skipped (unpriced): {shown}{more}")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(prog="adash")
     parser.add_argument("command", nargs="?", choices=["serve"],
@@ -58,6 +92,7 @@ def main() -> None:
         for u in usages:
             windows = "  ".join(f"{w.label}={w.pct}% (resets {w.resets_at})" for w in u.windows)
             print(f"{u.tool:9} {u.plan:12} {windows} {u.note} {u.error or ''}")
+        _print_value_block()
         return
 
     if args.dump:
