@@ -124,6 +124,39 @@ def test_codex_collector_merges_and_filters(codex_root: Path):
     assert s.first_prompt == "fix the bug"
 
 
+def test_codex_collector_includes_archived_sessions(codex_root: Path):
+    archived_id = "aaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+    _write_jsonl(
+        codex_root / "archived_sessions" / f"rollout-{archived_id}.jsonl",
+        [
+            {
+                "type": "session_meta",
+                "payload": {
+                    "session_id": archived_id,
+                    "cwd": "/tmp/archived",
+                    "thread_source": "user",
+                },
+            },
+            {
+                "type": "event_msg",
+                "payload": {
+                    "type": "user_message",
+                    "message": "keep archived conversations visible",
+                },
+            },
+        ],
+    )
+
+    sessions = collectors.collect_codex(root=codex_root)
+
+    assert {session.id for session in sessions} == {
+        "1111-2222-3333-4444-555555555555",
+        archived_id,
+    }
+    archived = next(session for session in sessions if session.id == archived_id)
+    assert archived.title == "Keep archived conversations visible"
+
+
 def test_codex_collector_titles_current_user_message_events(tmp_path: Path):
     """Codex 0.145 writes the typed prompt in event_msg, not response_item."""
     root = tmp_path / "codex"
