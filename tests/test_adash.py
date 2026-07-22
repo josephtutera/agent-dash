@@ -8,6 +8,7 @@ import os
 import sqlite3
 import sys
 import time
+import tomllib
 from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
@@ -381,7 +382,8 @@ def test_app_new_session_opens_warp_tab(tmp_path: Path, monkeypatch: pytest.Monk
     slug = app_module._dir_slug(os.getcwd())
     assert opened == [["open", f"warp://tab_config/agentdash-codex-{slug}"]]
     config = (tmp_path / "tab_configs" / f"agentdash-codex-{slug}.toml").read_text()
-    assert 'commands = ["codex"]' in config
+    cmd = tomllib.loads(config)["panes"][0]["commands"][0]
+    assert cmd == 'codex -c \'tui.terminal_title=["status","task-progress","project"]\''
     assert f'directory = "{os.getcwd()}"' in config
 
 
@@ -1093,7 +1095,40 @@ def test_terminal_tab_config_opens_bare_shell(tmp_path: Path):
 def test_agent_tab_config_still_has_command(tmp_path: Path):
     app_module._write_tab_config("codex", "/tmp/proj", tmp_path)
     config = (tmp_path / "agentdash-codex.toml").read_text()
-    assert 'commands = ["codex"]' in config
+    cmd = tomllib.loads(config)["panes"][0]["commands"][0]
+    assert cmd.startswith("codex ")
+
+
+def test_codex_tab_config_sets_task_aware_terminal_title(tmp_path: Path):
+    """A fresh codex tab is launched with the terminal_title override so its Warp
+    tab shows run state + task progress + repo, not just the repo name (codex's
+    default). The generated TOML must survive a parse round-trip (the -c value
+    contains double quotes that have to be escaped in the tab config)."""
+    app_module._write_tab_config("codex", "/tmp/proj", tmp_path)
+    config = (tmp_path / "agentdash-codex.toml").read_text()
+    cmd = tomllib.loads(config)["panes"][0]["commands"][0]
+    assert cmd == 'codex -c \'tui.terminal_title=["status","task-progress","project"]\''
+
+
+def test_codex_resume_keeps_title_flag_before_subcommand(tmp_path: Path):
+    """The override is a global flag, so it must sit before the `resume`
+    subcommand rather than after the session id."""
+    app_module._write_tab_config("codex", "/tmp/proj", tmp_path, suffix="resume-abc",
+                                 command="codex resume abc123")
+    config = (tmp_path / "agentdash-codex-resume-abc.toml").read_text()
+    cmd = tomllib.loads(config)["panes"][0]["commands"][0]
+    assert cmd == ('codex -c \'tui.terminal_title=["status","task-progress","project"]\' '
+                   'resume abc123')
+
+
+def test_non_codex_tabs_are_left_alone(tmp_path: Path):
+    """Only codex gets the override; claude titles its own tab, and injecting a
+    codex flag into other tools would break their launch."""
+    for tool, expected in (("claude", "claude"), ("opencode", "opencode")):
+        app_module._write_tab_config(tool, "/tmp/proj", tmp_path)
+        config = (tmp_path / f"agentdash-{tool}.toml").read_text()
+        cmd = tomllib.loads(config)["panes"][0]["commands"][0]
+        assert cmd == expected
 
 
 def test_bar_color_ramp():

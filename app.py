@@ -217,6 +217,31 @@ _TAB_COLORS = {"claude": "magenta", "codex": "green", "opencode": "blue", "termi
 # None means "open a plain shell in the directory" — no agent command is run
 _TAB_COMMANDS = {"claude": "claude", "codex": "codex", "opencode": "opencode", "terminal": None}
 
+# codex's default terminal_title is ["spinner", "project"], so its Warp tab only
+# ever shows a spinner + the repo name; Claude Code instead titles its tab after
+# the task. We opt agent-dash-launched codex tabs into a task-aware title (run
+# state + task progress + repo) to match. Passed per-invocation via `-c` so it
+# works even when the user hasn't set [tui].terminal_title in ~/.codex/config.toml.
+_CODEX_TITLE_ITEMS = ("status", "task-progress", "project")
+
+
+def _codex_title_flag() -> str:
+    items = ",".join(f'"{item}"' for item in _CODEX_TITLE_ITEMS)
+    return f"-c 'tui.terminal_title=[{items}]'"
+
+
+def _with_codex_title(command: str) -> str:
+    """Insert the terminal-title override right after the `codex` executable, so
+    it applies to both a fresh TUI (`codex`) and a resume (`codex resume <id>`)."""
+    head, _, tail = command.partition(" ")
+    return f"{head} {_codex_title_flag()}" + (f" {tail}" if tail else "")
+
+
+def _toml_basic(value: str) -> str:
+    """Escape a string for a TOML basic (double-quoted) string, so a command that
+    itself contains quotes (like the codex `-c` array) survives the round-trip."""
+    return value.replace("\\", "\\\\").replace('"', '\\"')
+
 
 def _warp_configs_dir() -> Path:
     return Path.home() / ".warp" / "tab_configs"
@@ -300,8 +325,10 @@ def _write_tab_config(tool: str, cwd: str, configs_dir: Path, suffix: str = "", 
     ]
     command = command if command is not None else _TAB_COMMANDS[tool]
     if command:
+        if tool == "codex":
+            command = _with_codex_title(command)
         prefix = "".join(f"{k}={v} " for k, v in (env or {}).items())
-        lines.append(f'commands = ["{prefix}{command}"]')
+        lines.append(f'commands = ["{_toml_basic(prefix + command)}"]')
     content = "\n".join(lines) + "\n"
     target = configs_dir / f"{stem}.toml"
     if not target.exists() or target.read_text() != content:
