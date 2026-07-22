@@ -20,7 +20,7 @@ from pathlib import Path
 from models import Session, clean_title
 
 DEFAULT_LIMIT = 300
-CACHE_VERSION = 4
+CACHE_VERSION = 5  # bumped when Session gained source_path
 
 
 def _parse_ts(value) -> datetime | None:
@@ -170,6 +170,7 @@ def _parse_claude_file(path: Path) -> Session | None:
         n_messages=n_messages,
         tokens=tokens,
         first_prompt=first_prompt,
+        source_path=str(path),
     )
 
 
@@ -267,6 +268,7 @@ def _parse_codex_file(path: Path) -> Session | None:
         n_messages=n_messages,
         tokens=tokens,
         first_prompt=first_prompt,
+        source_path=str(path),
     )
 
 
@@ -352,6 +354,7 @@ def collect_opencode(db_path: Path | None = None, limit: int = DEFAULT_LIMIT) ->
                 last_active=datetime.fromtimestamp(updated / 1000, tz=timezone.utc),
                 tokens=(t_in or 0) + (t_out or 0) + (t_reasoning or 0),
                 cost=cost or None,
+                source_path=str(db_path),
             )
         )
     return sessions

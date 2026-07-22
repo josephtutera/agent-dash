@@ -29,7 +29,7 @@ Homepage = "https://github.com/josephtutera/agent-dash"
 Issues = "https://github.com/josephtutera/agent-dash/issues"
 
 [tool.setuptools]
-py-modules = ["main", "app", "activity", "agents", "collectors", "models", "pricing", "usage"]
+py-modules = ["main", "app", "activity", "agents", "collectors", "models", "pricing", "titles", "usage"]
 
 [tool.setuptools.package-data]
 "*" = ["data/model_prices_snapshot.json"]

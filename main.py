@@ -11,7 +11,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent))
 
 from collectors import collect_all
-from models import fmt_tokens, rel_time, resume_command
+from models import fmt_tokens, osc_title_sequence, rel_time, resume_command
 
 # shown as the Warp tab title while the TUI runs, instead of the raw "adash" command
 TAB_TITLE = "◆ Agent Dash"
@@ -26,8 +26,7 @@ def set_tab_title(title: str) -> None:
     """
     if os.environ.get("TERM") == "dumb":
         return
-    for osc in (0, 1, 2):
-        sys.stdout.write(f"\x1b]{osc};{title}\x07")
+    sys.stdout.write(osc_title_sequence(title))
     sys.stdout.flush()
 
 

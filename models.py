@@ -27,10 +27,22 @@ class Session:
     tokens: int = 0
     cost: float | None = None
     first_prompt: str = ""
+    # newest transcript file (claude/codex) or db path (opencode); the title
+    # generator re-opens this to read a few conversation turns on demand.
+    source_path: str = ""
 
     @property
     def project_name(self) -> str:
         return Path(self.project_dir).name if self.project_dir else "?"
+
+
+def osc_title_sequence(title: str) -> str:
+    """OSC escape sequence that sets a terminal tab/window title.
+
+    Emits OSC 0 (icon + title), 1 (icon), and 2 (title) so Warp, iTerm2, and
+    Terminal.app all pick it up. An empty title clears the override.
+    """
+    return "".join(f"\x1b]{osc};{title}\x07" for osc in (0, 1, 2))
 
 
 def resume_invocation(session: Session) -> str:
