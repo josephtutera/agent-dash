@@ -1,8 +1,8 @@
 # agent-dash
 
-One terminal dashboard for your Claude Code, Codex, and OpenCode sessions:
-subscription usage, agents running right now, and your full searchable
-history, all in one place.
+One terminal dashboard for your Claude Code, Codex, OpenCode, and Gemini
+sessions: subscription usage, agents running right now, and your full
+searchable history, all in one place.
 
 <img width="3740" height="2438" alt="CleanShot 2026-07-20 at 13 27 43@2x" src="https://github.com/user-attachments/assets/a4735c00-ee6d-4f63-bcd7-ff029cd9235e" />
 
@@ -10,13 +10,15 @@ history, all in one place.
 
 - **Subscriptions at a glance.** Claude usage windows (5-hour and 7-day, with
   multi-account support), Codex rate-limit windows, and OpenCode 7-day API
-  spend, with color-coded bars as you warm up.
+  spend, with color-coded bars as you warm up. (Gemini has no local usage
+  signal, so it isn't shown here.)
 - **Active now.** A live view of every agent actually running on your machine:
   working / waiting / idle state, the file or command it's on, and live token
   counts. Hit enter or click a row to jump straight to that agent's Warp tab.
-- **Launch new sessions.** Start claude, codex, opencode, or a plain shell in
-  Warp tabs, in one directory or several at once, straight from the dashboard.
-- **Searchable history.** Every session from all three tools in one table.
+- **Launch new sessions.** Start claude, codex, opencode, gemini, or a plain
+  shell in Warp tabs, in one directory or several at once, straight from the
+  dashboard.
+- **Searchable history.** Every session from all four tools in one table.
   Filter by tool, search titles and projects, hit enter, and get the exact
   command to resume that session where you left off.
 - **Wrap-proof banner.** The figlet logo measures itself against the terminal
@@ -29,8 +31,8 @@ history, all in one place.
 - **Python 3.10+**
 - **[Warp](https://warp.dev)** for the new-session launcher (it drives
   `warp://tab_config/...`). The rest of the dashboard works in any terminal.
-- The CLIs you want to track: `claude`, `codex`, and/or `opencode`, with some
-  existing sessions for the dashboard to show.
+- The CLIs you want to track: `claude`, `codex`, `opencode`, and/or `gemini`,
+  with some existing sessions for the dashboard to show.
 
 ## Install
 
@@ -75,9 +77,9 @@ adash() {
 
 | Key | Action |
 | --- | --- |
-| `1`–`4` | filter history: all / claude / codex / opencode |
+| `1`–`5` | filter history: all / claude / codex / opencode / gemini |
 | `/` | search titles, prompts, projects (`esc` to close) |
-| `c` `x` `o` | new claude / codex / opencode session |
+| `c` `x` `o` `g` | new claude / codex / opencode / gemini session |
 | `t` | new plain terminal |
 | `tab` | switch the active Claude plan (multi-account) |
 | `C` / `u` | clear history / undo |
@@ -95,8 +97,9 @@ Warp still comes to the front but you'll pick the tab yourself.
 Everything the dashboard shows is read from data already on your machine:
 
 - **Sessions** are parsed from the files each CLI keeps locally:
-  `~/.claude/projects` (Claude Code), `~/.codex` (rollouts and history), and
-  OpenCode's sqlite database.
+  `~/.claude/projects` (Claude Code), `~/.codex` (rollouts and history),
+  OpenCode's sqlite database, and `~/.gemini/tmp/*/chats` (Gemini), with
+  `~/.gemini/projects.json` mapping each session back to its project directory.
 - **Claude usage** comes from the same OAuth usage endpoint the `/usage`
   command calls, using the OAuth token Claude Code stores in the macOS
   Keychain. **Codex usage** comes from rate-limit snapshots embedded in local

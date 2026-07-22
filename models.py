@@ -7,18 +7,19 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 
-TOOLS = ("claude", "codex", "opencode")
+TOOLS = ("claude", "codex", "opencode", "gemini")
 
 TOOL_COLORS = {
     "claude": "#e8865f",
     "codex": "#57b89a",
     "opencode": "#a78bfa",
+    "gemini": "#6ea9ff",
 }
 
 
 @dataclass
 class Session:
-    tool: str  # "claude" | "codex" | "opencode"
+    tool: str  # "claude" | "codex" | "opencode" | "gemini"
     id: str
     title: str
     project_dir: str
@@ -53,6 +54,10 @@ def resume_invocation(session: Session) -> str:
         "claude": f"claude --resume {shlex.quote(session.id)}",
         "codex": f"codex resume {shlex.quote(session.id)}",
         "opencode": f"opencode --session {shlex.quote(session.id)}",
+        # Gemini derives an 8-char short id from the session id and matches it
+        # against the current project's chats dir, so this resumes the exact
+        # session as long as the tab runs it in the right directory.
+        "gemini": f"gemini --resume {shlex.quote(session.id)}",
     }[session.tool]
 
 

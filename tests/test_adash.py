@@ -97,6 +97,28 @@ def opencode_db(tmp_path: Path) -> Path:
     return db
 
 
+@pytest.fixture
+def gemini_root(tmp_path: Path) -> Path:
+    root = tmp_path / "gemini"
+    root.mkdir(parents=True, exist_ok=True)
+    # projects.json maps a project path to the temp-dir slug; the collector
+    # inverts it to resolve a session's cwd from its <slug> directory.
+    with (root / "projects.json").open("w") as fh:
+        json.dump({"projects": {"/tmp/gem": "proj-slug"}}, fh)
+    sid = "11111111-2222-3333-4444-555555555555"
+    _write_jsonl(
+        root / "tmp" / "proj-slug" / "chats" / "session-1784500000000-11111111.jsonl",
+        [
+            {"sessionId": sid, "projectHash": "deadbeef", "startTime": "2026-07-19T10:00:00.000Z"},
+            {"id": "m1", "type": "user", "content": "add gemini to agent dash", "timestamp": "2026-07-19T10:00:01.000Z"},
+            {"id": "m2", "type": "gemini", "content": "Sure, here is the plan.", "timestamp": "2026-07-19T10:00:02.000Z"},
+            {"id": "m3", "type": "user", "content": "now write tests too", "timestamp": "2026-07-19T10:00:03.000Z"},
+            {"id": "m4", "type": "info", "content": "context loaded", "timestamp": "2026-07-19T10:00:04.000Z"},
+        ],
+    )
+    return root
+
+
 # ---------------------------------------------------------------- collectors
 
 
@@ -189,6 +211,36 @@ def test_opencode_collector(opencode_db: Path):
     assert s.project_dir == "/tmp/oc"
 
 
+def test_gemini_collector(gemini_root: Path):
+    sessions = collectors.collect_gemini(root=gemini_root)
+    assert len(sessions) == 1
+    s = sessions[0]
+    assert s.tool == "gemini"
+    assert s.id == "11111111-2222-3333-4444-555555555555"  # from the metadata line
+    assert s.project_dir == "/tmp/gem"  # resolved via projects.json
+    assert s.first_prompt == "add gemini to agent dash"
+    assert s.title == "Add gemini to agent dash"  # clean_title of the first prompt
+    assert s.n_messages == 3  # 2 user + 1 gemini; the info message is excluded
+    assert s.source_path.endswith("session-1784500000000-11111111.jsonl")
+
+
+def test_gemini_collector_blank_dir_when_project_unmapped(tmp_path: Path):
+    """A session in a temp dir with no projects.json entry still parses; its
+    project dir is left blank (renders '?', resume falls back to home)."""
+    root = tmp_path / "gemini"
+    _write_jsonl(
+        root / "tmp" / "orphan-slug" / "chats" / "session-1784500000000-99999999.jsonl",
+        [
+            {"sessionId": "99999999-0000-0000-0000-000000000000"},
+            {"id": "m1", "type": "user", "content": "hello gemini", "timestamp": "2026-07-19T10:00:01.000Z"},
+        ],
+    )
+    sessions = collectors.collect_gemini(root=root)
+    assert len(sessions) == 1
+    assert sessions[0].project_dir == ""
+    assert sessions[0].first_prompt == "hello gemini"
+
+
 def test_cache_roundtrip(claude_root: Path, tmp_path: Path):
     first = collectors.collect_all.__wrapped__ if hasattr(collectors.collect_all, "__wrapped__") else None
     cache: dict = {}
@@ -230,6 +282,13 @@ def test_resume_invocation_has_no_cd_and_directory_falls_home(tmp_path: Path):
                    last_active=datetime.now(timezone.utc))
     assert resume_invocation(gone) == "opencode --session s1"
     assert resume_directory(gone) == str(Path.home())
+
+
+def test_gemini_resume_invocation(tmp_path: Path):
+    s = Session(tool="gemini", id="g-123", title="t", project_dir=str(tmp_path),
+                last_active=datetime.now(timezone.utc))
+    assert resume_invocation(s) == "gemini --resume g-123"
+    assert resume_command(s) == f"cd {tmp_path} && gemini --resume g-123"
 
 
 # ---------------------------------------------------------------- usage
@@ -382,6 +441,34 @@ def test_app_new_session_opens_warp_tab(tmp_path: Path, monkeypatch: pytest.Monk
     assert opened == [["open", f"warp://tab_config/agentdash-codex-{slug}"]]
     config = (tmp_path / "tab_configs" / f"agentdash-codex-{slug}.toml").read_text()
     assert 'commands = ["codex"]' in config
+    assert f'directory = "{os.getcwd()}"' in config
+
+
+def test_app_new_gemini_session(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setattr(app_module, "collect_all", lambda limit=300: _fake_sessions())
+    _stub_usage(monkeypatch)
+    _stub_running(monkeypatch)
+    monkeypatch.setattr(app_module, "_warp_configs_dir", lambda: tmp_path / "tab_configs")
+    opened = []
+
+    class FakePopen:
+        def __init__(self, args, **kwargs):
+            opened.append(args)
+
+    monkeypatch.setattr(app_module, "Popen", FakePopen)
+
+    async def run() -> None:
+        app = AdashApp(cmd_file=str(tmp_path / "cmd"))
+        async with app.run_test(size=(110, 32)) as pilot:
+            await _wait_for_table(pilot, app)
+            await pilot.press("g")  # gemini launches immediately in the cwd
+            await pilot.pause(0.1)
+
+    asyncio.run(run())
+    slug = app_module._dir_slug(os.getcwd())
+    assert opened == [["open", f"warp://tab_config/agentdash-gemini-{slug}"]]
+    config = (tmp_path / "tab_configs" / f"agentdash-gemini-{slug}.toml").read_text()
+    assert 'commands = ["gemini"]' in config
     assert f'directory = "{os.getcwd()}"' in config
 
 
@@ -1078,7 +1165,7 @@ def test_clean_title_strips_extended_filler():
 
 
 def test_launch_tools_includes_terminal():
-    assert app_module.LAUNCH_TOOLS == ("claude", "codex", "opencode", "terminal")
+    assert app_module.LAUNCH_TOOLS == ("claude", "codex", "opencode", "gemini", "terminal")
 
 
 def test_terminal_tab_config_opens_bare_shell(tmp_path: Path):

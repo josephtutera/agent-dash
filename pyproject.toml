@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "agent-dash"
 version = "0.1.0"
-description = "One terminal dashboard for your Claude Code, Codex, and OpenCode sessions"
+description = "One terminal dashboard for your Claude Code, Codex, OpenCode, and Gemini sessions"
 readme = "README.md"
 license = { file = "LICENSE" }
 authors = [{ name = "Joseph Tutera" }]
