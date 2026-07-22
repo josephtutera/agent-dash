@@ -21,7 +21,15 @@ from textual.widgets import DataTable, Footer, Input, Static
 from activity import enrich
 from agents import RunningAgent, running_agents
 from collectors import collect_all
-from models import TOOL_COLORS, Session, fmt_tokens, rel_time, resume_directory, resume_invocation
+from models import (
+    TOOL_COLORS,
+    Session,
+    fmt_tokens,
+    rel_time,
+    resume_directory,
+    resume_invocation,
+)
+from titles import TitleStore, apply_titles, generate_title
 from usage import ToolUsage, UsageWindow, claude_profiles, collect_usage
 
 BAR_WIDTH = 24
@@ -52,6 +60,10 @@ ACTIVE_POLL_SECONDS = 2.0  # live activity refresh (cheap: file reads + one ps)
 # which meant a session you just started, or the one you're sitting in, never
 # showed up until you hit r. Poll it on a gentle loop so history stays current.
 HISTORY_POLL_SECONDS = 10.0
+# Title generation runs on the history poll: at most this many sessions are
+# titled per pass, and only when no batch is already in flight, so a big backlog
+# drips in over several passes instead of spawning a flood of codex processes.
+TITLE_BATCH = 4
 # Usage refresh. Claude hits a rate-limited API once per account here, and every
 # running Claude Code session polls the same endpoint against the same quota, so
 # this stays slow on purpose: the 5h/7d bars move far too gradually to be worth
@@ -417,6 +429,10 @@ class AdashApp(App):
         self.usage_fetched_at: datetime | None = None
         self.running: list[RunningAgent] = []
         self.agent_titles: dict[int, str] = {}  # pid -> title, see _resolve_agent_titles
+        # generated-title pipeline (see titles.py): the store persists titles by
+        # session id; in_flight guards against re-queuing a session mid-generation.
+        self._title_store = TitleStore()
+        self._titling_in_flight: set[str] = set()
         # unified selection chain: launch(chips) -> picker(dirs) -> active -> history
         self.zone = "launch"
         self.launch_idx = 0  # starts on claude
@@ -895,12 +911,57 @@ class AdashApp(App):
         self.call_from_thread(self._on_loaded, sessions)
 
     def _on_loaded(self, sessions: list[Session]) -> None:
+        # overlay cached generated titles before render so rows show the canonical
+        # title immediately; eligible is the set still needing (re)generation.
+        eligible = apply_titles(sessions, self._title_store)
         self.sessions = sessions
         self.dirs = self._recent_dirs()
         self.picker_idx = min(self.picker_idx, len(self.dirs))  # len(dirs) == the "other" row
         self._render_picker()
         self._populate()
         self.load_running()
+        self._schedule_titles(eligible)
+
+    def _schedule_titles(self, eligible: list[Session]) -> None:
+        """Queue a bounded batch of sessions for title generation. Only one batch
+        runs at a time (skipped while any is in flight) so codex usage stays
+        capped no matter how big the backlog is."""
+        if self._titling_in_flight or not eligible:
+            return
+        batch = eligible[:TITLE_BATCH]
+        for session in batch:
+            self._titling_in_flight.add(session.id)
+        self._generate_titles(batch)
+
+    @work(thread=True, group="titling")
+    def _generate_titles(self, batch: list[Session]) -> None:
+        from concurrent.futures import ThreadPoolExecutor
+
+        def one(session: Session) -> tuple[str, str, int, str]:
+            try:
+                title = generate_title(session)
+            except Exception:
+                # never let a single failure leave the session stuck in_flight
+                title = session.title
+            return session.id, title, session.n_messages, session.tool
+
+        # at most 2 concurrent codex processes; results stream back as they land
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            for session_id, title, n_messages, tool in pool.map(one, batch):
+                self.call_from_thread(self._on_title, session_id, title, n_messages, tool)
+
+    def _on_title(self, session_id: str, title: str, n_messages: int, tool: str) -> None:
+        self._title_store.put(session_id, title, n_messages, tool)
+        self._titling_in_flight.discard(session_id)
+        for session in self.sessions:
+            if session.id == session_id:
+                session.title = title
+                break
+        self._populate()
+        # a running agent may map to this session; refresh its active-now row
+        if self.running:
+            self._resolve_agent_titles()
+            self._render_active()
 
     def _matches(self, session: Session) -> bool:
         if self.tool_filter != "all" and session.tool != self.tool_filter:
