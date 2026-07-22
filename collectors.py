@@ -273,10 +273,15 @@ def _parse_codex_file(path: Path) -> Session | None:
 def collect_codex(root: Path | None = None, limit: int = DEFAULT_LIMIT, cache: dict | None = None) -> list[Session]:
     root = root or Path.home() / ".codex"
     sessions_dir = root / "sessions"
-    if not sessions_dir.is_dir():
+    archived_dir = root / "archived_sessions"
+    if not sessions_dir.is_dir() and not archived_dir.is_dir():
         return []
     # overscan: many rollout files are subagent spawns that get filtered out
-    files = sorted(sessions_dir.glob("**/rollout-*.jsonl"), key=lambda p: p.stat().st_mtime, reverse=True)[: limit * 4]
+    files = []
+    for directory in (sessions_dir, archived_dir):
+        if directory.is_dir():
+            files.extend(directory.glob("**/rollout-*.jsonl"))
+    files = sorted(files, key=lambda p: p.stat().st_mtime, reverse=True)[: limit * 4]
     parsed = _parse_files(files, _parse_codex_file, cache)
 
     # resumed threads produce multiple rollout files sharing one session_id;
