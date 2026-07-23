@@ -8,6 +8,7 @@ import os
 import sqlite3
 import sys
 import time
+import tomllib
 from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
@@ -440,7 +441,13 @@ def test_app_new_session_opens_warp_tab(tmp_path: Path, monkeypatch: pytest.Monk
     slug = app_module._dir_slug(os.getcwd())
     assert opened == [["open", f"warp://tab_config/agentdash-codex-{slug}"]]
     config = (tmp_path / "tab_configs" / f"agentdash-codex-{slug}.toml").read_text()
-    assert 'commands = ["codex"]' in config
+    cmd = tomllib.loads(config)["panes"][0]["commands"][0]
+    # codex runs with its own title silenced, behind a backgrounded title daemon
+    # that gets killed when codex exits (see _codex_launch_command)
+    assert "codex -c 'tui.terminal_title=[]'" in cmd
+    assert f"--codex-titles --cwd {os.getcwd()}" in cmd
+    assert cmd.strip().endswith("; kill $_adtw 2>/dev/null")
+    assert "status" not in cmd  # the old status|repo title is gone
     assert f'directory = "{os.getcwd()}"' in config
 
 
@@ -1180,7 +1187,42 @@ def test_terminal_tab_config_opens_bare_shell(tmp_path: Path):
 def test_agent_tab_config_still_has_command(tmp_path: Path):
     app_module._write_tab_config("codex", "/tmp/proj", tmp_path)
     config = (tmp_path / "agentdash-codex.toml").read_text()
-    assert 'commands = ["codex"]' in config
+    cmd = tomllib.loads(config)["panes"][0]["commands"][0]
+    assert "codex -c 'tui.terminal_title=[]'" in cmd
+
+
+def test_codex_tab_config_silences_codex_title_and_runs_the_daemon(tmp_path: Path):
+    """A fresh codex tab silences codex's own generic title (terminal_title=[])
+    and runs the in-tab title daemon that gives it a Claude-style descriptive
+    title. The generated TOML must survive a parse round-trip."""
+    app_module._write_tab_config("codex", "/tmp/proj", tmp_path)
+    config = (tmp_path / "agentdash-codex.toml").read_text()
+    cmd = tomllib.loads(config)["panes"][0]["commands"][0]
+    assert "codex -c 'tui.terminal_title=[]'" in cmd
+    assert "--codex-titles --cwd /tmp/proj" in cmd
+    assert cmd.strip().endswith("; kill $_adtw 2>/dev/null")
+
+
+def test_codex_resume_passes_the_session_to_the_daemon(tmp_path: Path):
+    """Resuming a codex session hands its id to the title daemon (so it tracks
+    that exact session) and still silences codex's own title before the `resume`
+    subcommand."""
+    app_module._write_tab_config("codex", "/tmp/proj", tmp_path, suffix="resume-abc",
+                                 command="codex resume abc123")
+    config = (tmp_path / "agentdash-codex-resume-abc.toml").read_text()
+    cmd = tomllib.loads(config)["panes"][0]["commands"][0]
+    assert "--codex-titles --cwd /tmp/proj --session abc123" in cmd
+    assert "codex -c 'tui.terminal_title=[]' resume abc123" in cmd
+
+
+def test_non_codex_tabs_are_left_alone(tmp_path: Path):
+    """Only codex gets the override; claude titles its own tab, and injecting a
+    codex flag into other tools would break their launch."""
+    for tool, expected in (("claude", "claude"), ("opencode", "opencode")):
+        app_module._write_tab_config(tool, "/tmp/proj", tmp_path)
+        config = (tmp_path / f"agentdash-{tool}.toml").read_text()
+        cmd = tomllib.loads(config)["panes"][0]["commands"][0]
+        assert cmd == expected
 
 
 def test_bar_color_ramp():
@@ -2270,3 +2312,126 @@ def test_recent_dirs_does_not_pin_cwd_inside_a_worktree(
     dirs = [d for d, _count, _last in AdashApp._recent_dirs(stub)]
     assert str(worktree) not in dirs  # the worktree cwd is not offered
     assert dirs == ["/tmp/proj-b", "/tmp/proj-a"]  # ranked history dirs, unpinned
+
+
+# ------------------------------------------------- codex in-tab title daemon
+
+import tab_titles  # noqa: E402
+from activity import LiveStatus, codex_status_for_file  # noqa: E402
+from tab_titles import (  # noqa: E402
+    CodexTabTitler,
+    compose_tab_title,
+    resolve_codex_session,
+)
+from titles import TitleStore, cached_or_fallback_title  # noqa: E402
+
+
+def test_codex_launch_command_wraps_fresh_and_resume():
+    fresh = app_module._codex_launch_command("codex", "/tmp/cx", "")
+    # daemon backgrounded first, codex (title silenced) in the foreground, then
+    # the daemon is killed when codex returns
+    assert "--codex-titles --cwd /tmp/cx" in fresh
+    assert "--session" not in fresh
+    assert " & _adtw=$!; " in fresh
+    assert "codex -c 'tui.terminal_title=[]'" in fresh
+    assert fresh.endswith("; kill $_adtw 2>/dev/null")
+
+    resume = app_module._codex_launch_command("codex resume abc-123", "/tmp/cx", "")
+    assert "--session abc-123" in resume
+    assert "codex -c 'tui.terminal_title=[]' resume abc-123" in resume
+
+
+def test_codex_launch_command_env_prefixes_codex_not_the_daemon():
+    cmd = app_module._codex_launch_command("codex", "/tmp/cx", "FOO=bar ")
+    daemon, _, foreground = cmd.partition(" & _adtw=$!; ")
+    assert "FOO=bar" not in daemon  # the daemon is not the thing being configured
+    assert foreground.startswith("FOO=bar codex -c 'tui.terminal_title=[]'")
+
+
+def test_resolve_codex_session_matches_resume_id(codex_root: Path):
+    sid = "1111-2222-3333-4444-555555555555"
+    session = resolve_codex_session("/tmp/cx", session_id=sid, root=codex_root)
+    assert session is not None and session.id == sid
+
+
+def test_resolve_codex_session_finds_fresh_session_by_directory(codex_root: Path):
+    session = resolve_codex_session("/tmp/cx", session_id="", since=0.0, root=codex_root)
+    assert session is not None and session.project_dir == "/tmp/cx"
+    # a session that started well before we launched is not this tab's session
+    future = time.time() + 10_000
+    assert resolve_codex_session("/tmp/cx", since=future, root=codex_root) is None
+    # nor is a session in a different directory
+    assert resolve_codex_session("/tmp/other", since=0.0, root=codex_root) is None
+
+
+def test_compose_tab_title_shows_spinner_only_while_working():
+    assert compose_tab_title("Fix The Bug", working=True, frame_char="⠙") == "⠙ Fix The Bug"
+    assert compose_tab_title("Fix The Bug", working=False, frame_char="⠙") == "Fix The Bug"
+    # no title yet: never emit a lone spinner
+    assert compose_tab_title("", working=True, frame_char="⠙") == ""
+
+
+def test_cached_or_fallback_title_prefers_the_generated_title(tmp_path: Path):
+    store = TitleStore(cache_dir=tmp_path)
+    session = Session(tool="codex", id="s1", title="Bug Fix Thread",
+                      project_dir="/tmp/cx", last_active=datetime.now(timezone.utc),
+                      first_prompt="fix the bug", n_messages=4)
+    # with nothing cached, fall back to the collector's title
+    assert cached_or_fallback_title(session, store) == "Bug Fix Thread"
+    store.put("s1", "Generated Title", 4, "codex")
+    assert cached_or_fallback_title(session, store) == "Generated Title"
+
+
+def test_codex_status_for_file_reports_working_then_idle(tmp_path: Path):
+    working = tmp_path / "working.jsonl"
+    _write_jsonl(working, [
+        {"type": "session_meta", "payload": {"session_id": "w", "cwd": "/tmp/cx", "thread_source": "user"}},
+        {"type": "response_item", "payload": {"type": "function_call", "name": "shell"}},
+    ])
+    assert codex_status_for_file(working).state == "working"
+
+    idle = tmp_path / "idle.jsonl"
+    _write_jsonl(idle, [
+        {"type": "session_meta", "payload": {"session_id": "i", "cwd": "/tmp/cx", "thread_source": "user"}},
+        {"type": "response_item", "payload": {"type": "function_call", "name": "shell"}},
+        {"type": "event_msg", "payload": {"type": "task_complete"}},
+    ])
+    assert codex_status_for_file(idle).state == "idle"
+
+
+def test_codex_tab_titler_generates_a_title_and_animates_when_working(codex_root: Path, tmp_path: Path):
+    store = TitleStore(cache_dir=tmp_path)
+    state = {"working": True}
+    titler = CodexTabTitler(
+        "/tmp/cx", session_id="", store=store, codex_root=codex_root, since=0.0,
+        generate=lambda session: "Generated Title",
+        spawn=lambda fn: fn(),  # run generation synchronously for a deterministic test
+        status_for_file=lambda path: LiveStatus(state="working" if state["working"] else "idle"),
+    )
+    # first tick: resolves the session, generates + caches a title, sees "working"
+    first = titler.tick(now=0.0)
+    assert first == "⠙ Generated Title"  # spinner frame 1 + generated title
+    assert store.get(titler.session.id)["title"] == "Generated Title"  # shared cache
+
+    # once codex goes idle the spinner drops and the bare title remains
+    state["working"] = False
+    assert titler.tick(now=10.0) == "Generated Title"
+
+
+def test_codex_tab_titler_shows_directory_placeholder_before_the_session_exists(tmp_path: Path):
+    empty_root = tmp_path / "empty-codex"
+    (empty_root / "sessions").mkdir(parents=True)
+    titler = CodexTabTitler("/tmp/web-app", session_id="", codex_root=empty_root,
+                            store=TitleStore(cache_dir=tmp_path))
+    assert titler.tick(now=0.0) == "codex · web-app"
+
+
+def test_main_dispatches_codex_titles(monkeypatch: pytest.MonkeyPatch):
+    import main as main_module
+
+    calls = {}
+    monkeypatch.setattr(tab_titles, "run_codex_titles",
+                        lambda cwd, session_id="": calls.update(cwd=cwd, session_id=session_id))
+    monkeypatch.setattr(sys, "argv", ["adash", "--codex-titles", "--cwd", "/tmp/cx", "--session", "abc"])
+    main_module.main()
+    assert calls == {"cwd": "/tmp/cx", "session_id": "abc"}

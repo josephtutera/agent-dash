@@ -16,6 +16,11 @@ TOOL_COLORS = {
     "gemini": "#6ea9ff",
 }
 
+# braille spinner frames for the "working" indicator, like the CLIs themselves.
+# One source of truth so the dashboard's active panel and the in-tab codex title
+# daemon animate the same way.
+SPINNER_FRAMES = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
+
 
 @dataclass
 class Session:
