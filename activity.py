@@ -111,19 +111,14 @@ def claude_activity(root: str | Path | None = None) -> dict[int, LiveStatus]:
 # ---------------------------------------------------------------- codex
 
 
-def codex_activity(root: str | Path | None = None) -> LiveStatus | None:
-    """LiveStatus for the newest codex rollout (tokens + last action), or None."""
-    base = Path(root) if root else Path.home() / ".codex" / "sessions"
-    files = sorted(
-        glob.glob(str(base / "**" / "rollout-*.jsonl"), recursive=True),
-        key=os.path.getmtime,
-        reverse=True,
-    )
-    if not files:
-        return None
+def codex_status_for_file(path: str | Path) -> LiveStatus:
+    """LiveStatus (working/idle + tokens + last action) for one codex rollout,
+    from a bounded tail of its end so it stays cheap on hundred-MB files. Used
+    both for the newest-session dashboard signal and, per tab, by the in-tab
+    codex title daemon."""
     tokens = 0
     last_activity = ""
-    for line in _tail_text(files[0]).splitlines():
+    for line in _tail_text(str(path)).splitlines():
         if '"payload"' not in line:
             continue
         try:
@@ -140,6 +135,19 @@ def codex_activity(root: str | Path | None = None) -> LiveStatus | None:
     if last_activity in _CODEX_WORKING:
         return LiveStatus(state="working", label=_CODEX_WORKING[last_activity], tokens=tokens)
     return LiveStatus(state="idle" if last_activity else "unknown", tokens=tokens)
+
+
+def codex_activity(root: str | Path | None = None) -> LiveStatus | None:
+    """LiveStatus for the newest codex rollout (tokens + last action), or None."""
+    base = Path(root) if root else Path.home() / ".codex" / "sessions"
+    files = sorted(
+        glob.glob(str(base / "**" / "rollout-*.jsonl"), recursive=True),
+        key=os.path.getmtime,
+        reverse=True,
+    )
+    if not files:
+        return None
+    return codex_status_for_file(files[0])
 
 
 # ---------------------------------------------------------------- opencode

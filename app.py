@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import os
 import re
+import shlex
 import subprocess
+import sys
 import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -22,6 +24,7 @@ from activity import enrich
 from agents import RunningAgent, running_agents
 from collectors import collect_all
 from models import (
+    SPINNER_FRAMES as _SPINNER,
     TOOL_COLORS,
     Session,
     fmt_tokens,
@@ -52,8 +55,6 @@ BANNER_FONTS = ("slant", "small")  # widest first; each is measured before use
 BANNER_CHROME = 6
 # the launcher can start any agent CLI, or just a plain shell ("terminal")
 LAUNCH_TOOLS = ("claude", "codex", "opencode", "terminal")
-# braille spinner frames for the "working" indicator, like the CLIs themselves
-_SPINNER = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
 ACTIVE_POLL_SECONDS = 2.0  # live activity refresh (cheap: file reads + one ps)
 # History refresh. The session list is read from local files (mtime-cached in
 # collectors, so re-scans are cheap), but it used to load only once at startup,
@@ -217,24 +218,50 @@ _TAB_COLORS = {"claude": "magenta", "codex": "green", "opencode": "blue", "termi
 # None means "open a plain shell in the directory" — no agent command is run
 _TAB_COMMANDS = {"claude": "claude", "codex": "codex", "opencode": "opencode", "terminal": None}
 
-# codex's default terminal_title is ["spinner", "project"], so its Warp tab only
-# ever shows a spinner + the repo name; Claude Code instead titles its tab after
-# the task. We opt agent-dash-launched codex tabs into a task-aware title (run
-# state + task progress + repo) to match. Passed per-invocation via `-c` so it
-# works even when the user hasn't set [tui].terminal_title in ~/.codex/config.toml.
-_CODEX_TITLE_ITEMS = ("status", "task-progress", "project")
+# codex can only build its tab title from a fixed menu of items (status, project,
+# git-branch, …); none of them is a task description, and it never auto-names a
+# session, so a codex tab can't title itself after the work the way Claude Code
+# does. Warp also only honors title writes from a tab's own processes, so the
+# dashboard can't rename a running codex tab from outside. To reach parity we
+# launch a small in-tab daemon (main.py --codex-titles) alongside codex that
+# rewrites the tab title from agent-dash's own generated title, and we silence
+# codex's own title (terminal_title=[]) so the two don't fight.
+_CODEX_SUPPRESS_TITLE = "-c 'tui.terminal_title=[]'"
 
 
-def _codex_title_flag() -> str:
-    items = ",".join(f'"{item}"' for item in _CODEX_TITLE_ITEMS)
-    return f"-c 'tui.terminal_title=[{items}]'"
+def _codex_resume_id(command: str) -> str:
+    """The session id from a `codex resume <id>` command, else "" for a fresh
+    launch. Passed to the title daemon so it tracks the resumed session exactly
+    instead of guessing from the directory."""
+    parts = shlex.split(command)
+    if len(parts) >= 3 and parts[0] == "codex" and parts[1] == "resume":
+        return parts[2]
+    return ""
 
 
-def _with_codex_title(command: str) -> str:
-    """Insert the terminal-title override right after the `codex` executable, so
-    it applies to both a fresh TUI (`codex`) and a resume (`codex resume <id>`)."""
-    head, _, tail = command.partition(" ")
-    return f"{head} {_codex_title_flag()}" + (f" {tail}" if tail else "")
+def _codex_title_daemon(cwd: str, session_id: str) -> str:
+    """The `python main.py --codex-titles …` invocation that titles this tab.
+    Uses the same interpreter and repo as the running dashboard so it shares the
+    title cache and needs no separate install."""
+    python = shlex.quote(sys.executable)
+    script = shlex.quote(str(Path(__file__).resolve().parent / "main.py"))
+    cmd = f"{python} {script} --codex-titles --cwd {shlex.quote(cwd)}"
+    if session_id:
+        cmd += f" --session {shlex.quote(session_id)}"
+    return cmd
+
+
+def _codex_launch_command(command: str, cwd: str, env_prefix: str) -> str:
+    """Wrap a codex launch so the tab gets a Claude-style live title: start the
+    title daemon in the background, run codex in the foreground with its own
+    title silenced, and kill the daemon when codex exits."""
+    head, _, tail = command.partition(" ")  # head="codex", tail="resume <id>"|""
+    codex = f"{head} {_CODEX_SUPPRESS_TITLE}" + (f" {tail}" if tail else "")
+    daemon = _codex_title_daemon(cwd, _codex_resume_id(command))
+    return (
+        f"{daemon} >/dev/null 2>&1 & _adtw=$!; "
+        f"{env_prefix}{codex}; kill $_adtw 2>/dev/null"
+    )
 
 
 def _toml_basic(value: str) -> str:
@@ -325,10 +352,12 @@ def _write_tab_config(tool: str, cwd: str, configs_dir: Path, suffix: str = "", 
     ]
     command = command if command is not None else _TAB_COMMANDS[tool]
     if command:
-        if tool == "codex":
-            command = _with_codex_title(command)
         prefix = "".join(f"{k}={v} " for k, v in (env or {}).items())
-        lines.append(f'commands = ["{_toml_basic(prefix + command)}"]')
+        if tool == "codex":
+            full = _codex_launch_command(command, cwd, prefix)
+        else:
+            full = prefix + command
+        lines.append(f'commands = ["{_toml_basic(full)}"]')
     content = "\n".join(lines) + "\n"
     target = configs_dir / f"{stem}.toml"
     if not target.exists() or target.read_text() != content:

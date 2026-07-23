@@ -76,7 +76,17 @@ def main() -> None:
     parser.add_argument("--host", default="127.0.0.1",
                         help="serve: host to bind (default 127.0.0.1; non-loopback needs ADASH_SERVE_ALLOW_REMOTE=1)")
     parser.add_argument("--port", type=int, default=8737, help="serve: port to bind (default 8737)")
+    parser.add_argument("--codex-titles", action="store_true",
+                        help="in-tab daemon: live-title the codex Warp tab this runs in (internal)")
+    parser.add_argument("--cwd", help="codex-titles: the tab's working directory")
+    parser.add_argument("--session", default="", help="codex-titles: the resumed session id, if any")
     args = parser.parse_args()
+
+    if args.codex_titles:
+        from tab_titles import run_codex_titles
+
+        run_codex_titles(cwd=args.cwd or os.getcwd(), session_id=args.session or "")
+        return
 
     if args.command == "serve" or args.serve:
         from serve import serve

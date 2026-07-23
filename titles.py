@@ -338,6 +338,17 @@ def _fallback_title(session: Session) -> str:
     return session.title or "(untitled)"
 
 
+def cached_or_fallback_title(session: Session, store: TitleStore) -> str:
+    """The title to show right now: the cached generated one if there is one,
+    else the collector's title (codex thread name / cleaned first prompt). Mirrors
+    what apply_titles overlays on the dashboard, so a codex tab and the dashboard
+    always agree on the same string."""
+    entry = store.get(session.id)
+    if entry and entry.get("title"):
+        return entry["title"]
+    return session.title or _fallback_title(session)
+
+
 def generate_title(session: Session) -> str:
     """The canonical title for a session. Always returns a string: the generated
     title on success, else a deterministic fallback (so a transient codex failure
