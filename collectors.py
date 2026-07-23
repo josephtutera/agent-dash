@@ -1,4 +1,4 @@
-"""Collect sessions from Claude Code, Codex, and OpenCode local storage.
+"""Collect sessions from Claude Code, Codex, OpenCode, and Gemini local storage.
 
 Each collector is defensive: malformed lines and missing files are skipped,
 because these on-disk formats change between tool versions.
@@ -15,12 +15,13 @@ import re
 import sqlite3
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
+from functools import partial
 from pathlib import Path
 
 from models import Session, clean_title
 
 DEFAULT_LIMIT = 300
-CACHE_VERSION = 5  # bumped when Session gained source_path
+CACHE_VERSION = 6  # bumped when the gemini collector was added
 
 
 def _parse_ts(value) -> datetime | None:
@@ -360,6 +361,88 @@ def collect_opencode(db_path: Path | None = None, limit: int = DEFAULT_LIMIT) ->
     return sessions
 
 
+# ---------------------------------------------------------------- gemini
+
+# The Gemini CLI persists each session as a JSONL file under a per-project temp
+# dir: ~/.gemini/tmp/<shortId>/chats/session-<epochMs>-<idPrefix>.jsonl. The
+# first line is session metadata (sessionId, timestamps); the remaining lines
+# are message objects tagged type "user" | "gemini" | "info". The <shortId>
+# dir name resolves back to a real project path via ~/.gemini/projects.json.
+
+
+def _load_gemini_project_dirs(root: Path) -> dict[str, str]:
+    """Invert ~/.gemini/projects.json ({"projects": {path: shortId}}) into a
+    shortId -> project-path map, so a session's temp dir resolves to its cwd."""
+    try:
+        with (root / "projects.json").open(encoding="utf-8") as fh:
+            data = json.load(fh)
+    except (OSError, ValueError):
+        return {}
+    projects = data.get("projects") if isinstance(data, dict) else None
+    if not isinstance(projects, dict):
+        return {}
+    return {short_id: path for path, short_id in projects.items() if isinstance(short_id, str)}
+
+
+def _parse_gemini_file(path: Path, dir_map: dict[str, str]) -> Session | None:
+    session_id = path.stem  # fallback; the metadata line carries the real id
+    first_prompt = ""
+    n_messages = 0
+    try:
+        with path.open(encoding="utf-8", errors="replace") as fh:
+            for line in fh:
+                try:
+                    obj = json.loads(line)
+                except ValueError:
+                    continue
+                if not isinstance(obj, dict):
+                    continue
+                # the metadata line has a sessionId and no message "type"
+                if "sessionId" in obj and "type" not in obj:
+                    sid = obj.get("sessionId")
+                    if isinstance(sid, str) and sid:
+                        session_id = sid
+                    continue
+                kind = obj.get("type") or obj.get("role")
+                if kind == "user":
+                    text = _user_text(obj.get("content"))
+                    if text is not None:
+                        n_messages += 1
+                        if not first_prompt:
+                            first_prompt = text
+                elif kind in ("gemini", "model", "assistant"):
+                    n_messages += 1
+    except OSError:
+        return None
+    # <shortId>/chats/session-*.jsonl -> the <shortId> dir names the project
+    short_id = path.parent.parent.name
+    project_dir = dir_map.get(short_id, "")
+    last = datetime.fromtimestamp(path.stat().st_mtime, tz=timezone.utc)
+    title = clean_title(first_prompt) if first_prompt else "(untitled)"
+    return Session(
+        tool="gemini",
+        id=session_id,
+        title=title,
+        project_dir=project_dir,
+        last_active=last,
+        n_messages=n_messages,
+        first_prompt=first_prompt,
+        source_path=str(path),
+    )
+
+
+def collect_gemini(root: Path | None = None, limit: int = DEFAULT_LIMIT, cache: dict | None = None) -> list[Session]:
+    root = root or Path.home() / ".gemini"
+    tmp_dir = root / "tmp"
+    if not tmp_dir.is_dir():
+        return []
+    files = sorted(
+        tmp_dir.glob("*/chats/session-*.jsonl"), key=lambda p: p.stat().st_mtime, reverse=True
+    )[:limit]
+    dir_map = _load_gemini_project_dirs(root)
+    return _parse_files(files, partial(_parse_gemini_file, dir_map=dir_map), cache)
+
+
 # ---------------------------------------------------------------- shared
 
 
@@ -414,10 +497,14 @@ def _load_cache(cache_dir: Path | None) -> dict:
         with _cache_file(cache_dir).open() as fh:
             data = json.load(fh)
         if data.get("version") == CACHE_VERSION:
-            return {"claude": data.get("claude", {}), "codex": data.get("codex", {})}
+            return {
+                "claude": data.get("claude", {}),
+                "codex": data.get("codex", {}),
+                "gemini": data.get("gemini", {}),
+            }
     except (OSError, ValueError):
         pass
-    return {"claude": {}, "codex": {}}
+    return {"claude": {}, "codex": {}, "gemini": {}}
 
 
 def _save_cache(cache_dir: Path | None, cache: dict) -> None:
@@ -429,11 +516,12 @@ def _save_cache(cache_dir: Path | None, cache: dict) -> None:
 
 
 def collect_all(limit: int = DEFAULT_LIMIT, use_cache: bool = True, cache_dir: Path | None = None) -> list[Session]:
-    cache = _load_cache(cache_dir) if use_cache else {"claude": {}, "codex": {}}
+    cache = _load_cache(cache_dir) if use_cache else {"claude": {}, "codex": {}, "gemini": {}}
     sessions = (
         collect_claude(limit=limit, cache=cache["claude"])
         + collect_codex(limit=limit, cache=cache["codex"])
         + collect_opencode(limit=limit)
+        + collect_gemini(limit=limit, cache=cache["gemini"])
     )
     if use_cache:
         _save_cache(cache_dir, cache)

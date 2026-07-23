@@ -184,6 +184,25 @@ def test_excerpt_codex(tmp_path: Path):
     assert "make them colored" in excerpt
 
 
+def test_excerpt_gemini(tmp_path: Path):
+    path = tmp_path / "session-123.jsonl"
+    _write_jsonl(
+        path,
+        [
+            {"sessionId": "g1", "startTime": "2026-07-19T10:00:00.000Z"},
+            {"id": "m1", "type": "user", "content": "wire gemini into the launcher"},
+            {"id": "m2", "type": "gemini", "content": "Done, added the tab command."},
+            {"id": "m3", "type": "user", "content": "and the filter key"},
+            {"id": "m4", "type": "info", "content": "loaded GEMINI.md"},
+        ],
+    )
+    excerpt = conversation_excerpt(_session(tool="gemini", source_path=str(path)))
+    assert "wire gemini into the launcher" in excerpt
+    assert "Done, added the tab command." in excerpt
+    assert "and the filter key" in excerpt
+    assert "loaded GEMINI.md" not in excerpt  # info messages skipped
+
+
 def test_excerpt_opencode(tmp_path: Path):
     db = tmp_path / "opencode.db"
     con = sqlite3.connect(db)

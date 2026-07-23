@@ -1,9 +1,9 @@
-"""Detect currently running claude / codex / opencode terminal sessions.
+"""Detect currently running claude / codex / opencode / gemini terminal sessions.
 
-Scans the process table for the three CLI binaries with a real controlling
-terminal (which filters out desktop apps, dev servers, and crashpad helpers),
-then resolves each process's working directory so the dashboard can match it
-back to a session title.
+Scans the process table for the CLI binaries with a real controlling terminal
+(which filters out desktop apps, dev servers, and crashpad helpers), then
+resolves each process's working directory so the dashboard can match it back to
+a session title.
 """
 
 from __future__ import annotations
@@ -18,6 +18,10 @@ _TOOL_PATTERNS = {
     "claude": re.compile(r"(?:^|\s|/)claude(?:\s|$)"),
     "codex": re.compile(r"(?:^|\s|/)codex(?:\s|$)"),
     "opencode": re.compile(r"(?:^|\s|/)opencode(?:\s|$)"),
+    # Gemini is a Node CLI, so a running session shows up as
+    # `node .../@google/gemini-cli/bundle/gemini.js`; match the entrypoint
+    # filename (and the bare `gemini` command) rather than a native binary.
+    "gemini": re.compile(r"(?:^|\s|/)gemini(?:-cli)?(?:\.js)?(?:\s|$)"),
 }
 
 # lines that look like a match but aren't an interactive agent session

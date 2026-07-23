@@ -216,6 +216,32 @@ def _excerpt_codex(path: Path) -> str:
     return _compose_excerpt(first_user, first_asst, last_user)
 
 
+def _excerpt_gemini(path: Path) -> str:
+    """Gemini writes one JSON object per line: a metadata header, then message
+    objects tagged type "user" | "gemini" with string content."""
+    first_user = first_asst = last_user = ""
+    try:
+        with path.open(encoding="utf-8", errors="replace") as fh:
+            for line in fh:
+                try:
+                    obj = json.loads(line)
+                except ValueError:
+                    continue
+                if not isinstance(obj, dict):
+                    continue
+                kind = obj.get("type")
+                if kind == "user":
+                    text = _user_text(obj.get("content"))
+                    if text:
+                        first_user = first_user or text
+                        last_user = text
+                elif kind in ("gemini", "model") and not first_asst:
+                    first_asst = _assistant_text(obj.get("content")) or ""
+    except OSError:
+        return ""
+    return _compose_excerpt(first_user, first_asst, last_user)
+
+
 def _excerpt_opencode(db_path: Path, session_id: str) -> str:
     """OpenCode stores conversation text in the `part` table (type 'text'),
     joined to `message` for the speaker's role."""
@@ -267,6 +293,8 @@ def conversation_excerpt(session: Session) -> str:
         return _excerpt_claude(path)
     if session.tool == "codex":
         return _excerpt_codex(path)
+    if session.tool == "gemini":
+        return _excerpt_gemini(path)
     return ""
 
 

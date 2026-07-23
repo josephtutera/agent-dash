@@ -54,7 +54,9 @@ BANNER_FONTS = ("slant", "small")  # widest first; each is measured before use
 # the scrollbar pops in after data loads
 BANNER_CHROME = 6
 # the launcher can start any agent CLI, or just a plain shell ("terminal")
-LAUNCH_TOOLS = ("claude", "codex", "opencode", "terminal")
+LAUNCH_TOOLS = ("claude", "codex", "opencode", "gemini", "terminal")
+# braille spinner frames for the "working" indicator, like the CLIs themselves
+_SPINNER = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
 ACTIVE_POLL_SECONDS = 2.0  # live activity refresh (cheap: file reads + one ps)
 # History refresh. The session list is read from local files (mtime-cached in
 # collectors, so re-scans are cheap), but it used to load only once at startup,
@@ -214,9 +216,9 @@ def _activity_detail(agent) -> str:
     return " · ".join(bits)
 
 
-_TAB_COLORS = {"claude": "magenta", "codex": "green", "opencode": "blue", "terminal": "blue"}
+_TAB_COLORS = {"claude": "magenta", "codex": "green", "opencode": "blue", "gemini": "cyan", "terminal": "blue"}
 # None means "open a plain shell in the directory" — no agent command is run
-_TAB_COMMANDS = {"claude": "claude", "codex": "codex", "opencode": "opencode", "terminal": None}
+_TAB_COMMANDS = {"claude": "claude", "codex": "codex", "opencode": "opencode", "gemini": "gemini", "terminal": None}
 
 # codex can only build its tab title from a fixed menu of items (status, project,
 # git-branch, …); none of them is a task description, and it never auto-names a
@@ -461,9 +463,11 @@ class AdashApp(App):
         ("2", "filter_claude", "claude"),
         ("3", "filter_codex", "codex"),
         ("4", "filter_opencode", "opencode"),
+        ("5", "filter_gemini", "gemini"),
         ("c", "new_claude", "new claude"),
         ("x", "new_codex", "new codex"),
         ("o", "new_opencode", "new opencode"),
+        ("g", "new_gemini", "new gemini"),
         ("t", "new_terminal", "terminal"),
         Binding("tab", "switch_plan", "switch plan", priority=True),
         ("C", "clear", "clear history"),
@@ -1184,6 +1188,9 @@ class AdashApp(App):
     def action_new_opencode(self) -> None:
         self._launch("opencode")
 
+    def action_new_gemini(self) -> None:
+        self._launch("gemini")
+
     def action_new_terminal(self) -> None:
         self._launch("terminal")
 
@@ -1275,6 +1282,9 @@ class AdashApp(App):
 
     def action_filter_opencode(self) -> None:
         self._set_filter("opencode")
+
+    def action_filter_gemini(self) -> None:
+        self._set_filter("gemini")
 
     def action_refresh(self) -> None:
         self.load_sessions()
