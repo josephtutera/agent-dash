@@ -103,6 +103,13 @@ extension HUDSnapshot {
         agents.filter { $0.isWaiting }.count
     }
 
+    /// Agents the card actually shows: currently working or waiting. Idle and
+    /// stale sessions are dropped so the list can't go out of date — it only
+    /// ever holds live work, ordered as the daemon sent it.
+    public var runningAgents: [Agent] {
+        agents.filter { !$0.isIdle }
+    }
+
     /// The single tightest window across every subscription, spent limits
     /// included, for the one severity ring the compact collapsed face carries so
     /// a plan running dry still warns from the menu bar without the full card.

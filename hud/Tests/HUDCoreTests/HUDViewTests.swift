@@ -94,6 +94,20 @@ final class HUDViewTests: XCTestCase {
         XCTAssertFalse(agent(pid: 1, state: "working").isIdle)
     }
 
+    func testRunningAgentsDropsIdleAndStale() {
+        let snap = HUDSnapshot(
+            version: 1, generatedAt: nil, subscriptions: [],
+            agents: [
+                agent(pid: 1, state: "working"),
+                agent(pid: 2, state: "idle"),
+                agent(pid: 3, state: "waiting"),
+                agent(pid: 4, state: "zombie"), // unknown -> idle -> dropped
+            ],
+            value: nil, soonestReset: nil)
+        // Only working + waiting survive, in the daemon's order.
+        XCTAssertEqual(snap.runningAgents.map(\.pid), [1, 3])
+    }
+
     // MARK: - Glance worst-quota ring
 
     private func subWithTightest(_ pct: Int?) -> Subscription {
