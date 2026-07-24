@@ -3,9 +3,11 @@ import SwiftUI
 import AppKit
 #endif
 
-// The click-through card. A panel-glass surface with, top to bottom: one
-// section per subscription, an AGENTS section, a VALUE AT API RATES section,
-// and a footer. Width ~460, radius 14, hairline border.
+// The click-through card, cockpit layout. Top to bottom: a slim header, a gauge
+// cluster (one pod per subscription with a big session readout + fuel bar), a
+// pace-warning strip, the active agents, a value strip, and a footer. Colors are
+// the dynamic Theme tokens, so the whole card follows the system light/dark
+// appearance. Width 460, radius 14, hairline border.
 
 public struct PopoverCard: View {
     public let snapshot: HUDSnapshot?
@@ -24,21 +26,23 @@ public struct PopoverCard: View {
     }
 
     public var body: some View {
-        VStack(alignment: .leading, spacing: 18) {
+        VStack(alignment: .leading, spacing: 16) {
             if let snap = snapshot {
-                ForEach(orderedSubs) { sub in
-                    SubscriptionSectionView(sub: sub, tightest: snap.overallTightest, now: now)
+                CardHeaderView(now: now)
+                GaugeClusterView(subs: orderedSubs, now: now)
+                if let tight = snap.overallTightest, let pace = tight.window.pace {
+                    PaceStripView(sub: tight.sub, pace: pace, now: now)
                 }
-                AgentsSectionView(agents: snap.agents, now: now)
+                AgentsSectionView(agents: snap.runningAgents, now: now)
                 if let value = snap.value {
-                    ValueSectionView(value: value, now: now)
+                    ValueStripView(value: value, now: now)
                 }
                 FooterView(generatedAt: snap.generatedAt, now: now)
             } else {
                 OfflineView()
             }
         }
-        .padding(18)
+        .padding(16)
         .frame(width: 460, alignment: .leading)
         .background(
             RoundedRectangle(cornerRadius: 14, style: .continuous)
@@ -48,6 +52,34 @@ public struct PopoverCard: View {
             RoundedRectangle(cornerRadius: 14, style: .continuous)
                 .strokeBorder(Theme.hairline, lineWidth: 1)
         )
+    }
+}
+
+// MARK: - Header
+
+/// A slim card head: the wordmark, a hairline that fills the row, and the
+/// current date and time, so the card reads as a dated snapshot.
+struct CardHeaderView: View {
+    let now: Date
+
+    var body: some View {
+        HStack(spacing: 10) {
+            Text("AGENT DASH")
+                .font(Theme.label(11, weight: .semibold))
+                .tracking(2.0)
+                .foregroundStyle(Theme.text)
+            Rectangle().fill(Theme.hairline).frame(height: 1)
+            Text(Self.dateText(now))
+                .font(Theme.mono(10))
+                .foregroundStyle(Theme.muted)
+                .fixedSize()
+        }
+    }
+
+    static func dateText(_ now: Date) -> String {
+        let f = DateFormatter()
+        f.dateFormat = "EEE MMM d"
+        return "\(f.string(from: now)) · \(Fmt.clock(now))"
     }
 }
 
@@ -79,140 +111,210 @@ extension SectionRule where Accessory == EmptyView {
     }
 }
 
-// MARK: - Subscription section
+// MARK: - Gauge cluster
 
-struct SubscriptionSectionView: View {
+/// The instrument cluster: one gauge pod per subscription, equal width.
+struct GaugeClusterView: View {
+    let subs: [Subscription]
+    let now: Date
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 9) {
+            ForEach(subs) { sub in
+                PodView(sub: sub, now: now)
+            }
+        }
+    }
+}
+
+/// One plan's gauge pod: mark + short name, the big session percent, a fuel bar
+/// (filled by consumed, severity-colored), and a two-line caption (session
+/// detail, then the weekly window with a red flag if an extra/Fable limit is
+/// spent). When the session window is pressured (< 25% left) the whole pod
+/// lights in its severity color, the way a dashboard warning lamp does.
+struct PodView: View {
     let sub: Subscription
-    let tightest: (sub: Subscription, window: Window)?
     let now: Date
 
-    private var status: (text: String, color: Color) { sub.status(now: now) }
+    private var sessionWindow: Window? { sub.sessionWindow ?? sub.tightest ?? sub.windows.first }
+    private var sessionPct: Int? { sessionWindow?.pctLeft }
+    private var severity: Color { Theme.severity(pctLeft: sessionPct) }
+
+    /// Lit when the session window is amber/red (pressured), i.e. < 25% left.
+    private var isLit: Bool {
+        guard let p = sessionPct else { return false }
+        return p < 25
+    }
+
+    private var shortName: String {
+        if sub.label.hasPrefix("Claude ") {
+            return String(sub.label.dropFirst("Claude ".count))
+        }
+        if sub.provider == "codex" { return "Codex" }
+        return sub.label
+    }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            // (a) Header row: mark + name caps + rule + status.
-            HStack(spacing: 8) {
-                BrandMark(provider: sub.provider, size: 13)
-                Text(sub.label.uppercased())
-                    .font(Theme.label(10, weight: .semibold))
-                    .tracking(1.2)
-                    .foregroundStyle(Theme.text)
-                Rectangle()
-                    .fill(Theme.hairline)
-                    .frame(height: 1)
-                Text(statusText)
-                    .font(Theme.mono(10))
-                    .foregroundStyle(status.color)
-                    .monospacedDigit()
-                    .fixedSize()
-            }
-
-            // (b) One meter row per window.
-            ForEach(Array(sub.windows.enumerated()), id: \.offset) { _, window in
-                MeterRow(window: window, dimmed: sub.stale != nil, now: now)
-            }
-
-            // (c) Pace line, only under the single overall-tightest window.
-            if let tight = tightest,
-               tight.sub.id == sub.id,
-               let pace = tight.window.pace {
-                Text(paceLine(pace: pace, window: tight.window))
-                    .font(Theme.label(10))
+        VStack(alignment: .leading, spacing: 9) {
+            HStack(spacing: 6) {
+                BrandMark(provider: sub.provider, size: 12, tint: Theme.providerColor(sub.provider))
+                Text(shortName.uppercased())
+                    .font(Theme.label(9, weight: .semibold))
+                    .tracking(1.0)
                     .foregroundStyle(Theme.muted)
-                    .padding(.leading, 34)
+            }
+
+            HStack(alignment: .firstTextBaseline, spacing: 2) {
+                Text(Fmt.glancePercent(pctLeft: sessionPct))
+                    .font(Theme.mono(32, weight: .semibold))
+                    .foregroundStyle(isLit ? severity : Theme.text)
+                    .monospacedDigit()
+                Text("%")
+                    .font(Theme.mono(12))
+                    .foregroundStyle(isLit ? severity.opacity(0.7) : Theme.muted)
+            }
+
+            PodFuelBar(pctLeft: sessionPct)
+
+            VStack(alignment: .leading, spacing: 2) {
+                Text(sessionCaption)
+                    .font(Theme.mono(9.5))
+                    .foregroundStyle(Theme.muted)
+                weeklyCaption
+            }
+        }
+        .padding(12)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(
+            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                .fill(isLit ? severity.opacity(0.10) : Theme.panel2)
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                .strokeBorder(isLit ? severity.opacity(0.40) : Theme.hairline, lineWidth: 1)
+        )
+    }
+
+    private var sessionCaption: String {
+        guard let w = sessionWindow else { return "" }
+        let label = Fmt.windowLabel(kind: w.kind)
+        if let reset = w.resetsAt {
+            return "\(label) · \(Fmt.countdown(to: reset, now: now)) left"
+        }
+        return label
+    }
+
+    @ViewBuilder
+    private var weeklyCaption: some View {
+        let fableMaxed = sub.fableWindow?.isLimitReached ?? false
+        HStack(spacing: 0) {
+            Text(weeklyText)
+                .font(Theme.mono(9.5))
+                .foregroundStyle(Theme.faint)
+            if fableMaxed {
+                Text(" · ")
+                    .font(Theme.mono(9.5))
+                    .foregroundStyle(Theme.faint)
+                Text("F maxed")
+                    .font(Theme.mono(9.5))
+                    .foregroundStyle(Theme.red)
             }
         }
     }
 
-    private var statusText: String {
-        if let reason = sub.stale {
-            return "stale · \(reason)"
-        }
-        return status.text
-    }
-
-    private func paceLine(pace: Pace, window: Window) -> String {
-        let dry = Fmt.clock(pace.projectedDryAt)
-        let margin = Fmt.sinceLabel(seconds: pace.marginSeconds)
-        return "at this pace, dry \(dry), \(margin) before reset"
+    private var weeklyText: String {
+        guard let w = sub.weekly7dWindow else { return "" }
+        let label = Fmt.windowLabel(kind: w.kind)
+        let pct = w.pctLeft.map { "\($0)%" } ?? "--"
+        return "\(label) · \(pct)"
     }
 }
 
-// MARK: - Meter row
-
-struct MeterRow: View {
-    let window: Window
-    let dimmed: Bool
-    let now: Date
-
-    var body: some View {
-        HStack(spacing: 10) {
-            Text(Fmt.windowLabel(kind: window.kind))
-                .font(Theme.mono(11))
-                .foregroundStyle(Theme.muted)
-                .frame(width: 26, alignment: .leading)
-
-            ProgressBar(pctLeft: window.pctLeft)
-                .frame(height: 4)
-
-            Text(Fmt.meterValue(pctLeft: window.pctLeft, resetsAt: window.resetsAt, now: now))
-                .font(Theme.mono(11))
-                .foregroundStyle(Theme.text)
-                .monospacedDigit()
-                .frame(width: 96, alignment: .trailing)
-        }
-        .opacity(dimmed ? 0.5 : 1.0)
-    }
-}
-
-/// A 4pt rounded progress bar. Fill = consumed fraction, severity-colored, with
-/// a soft glow on amber/red fills so pressure reads at a glance.
-struct ProgressBar: View {
+/// A 4pt rounded fuel bar for a pod: fill = consumed fraction, severity-colored.
+struct PodFuelBar: View {
     let pctLeft: Int?
 
     var body: some View {
         GeometryReader { geo in
             let fraction = Fmt.consumed(pctLeft: pctLeft)
-            let color = Theme.severity(pctLeft: pctLeft)
-            let glow = (pctLeft ?? 100) < 25
             ZStack(alignment: .leading) {
                 Capsule().fill(Theme.hairline)
                 Capsule()
-                    .fill(color)
+                    .fill(Theme.severity(pctLeft: pctLeft))
                     .frame(width: max(0, min(1, fraction)) * geo.size.width)
-                    .shadow(color: glow ? color.opacity(0.7) : .clear, radius: glow ? 4 : 0)
             }
         }
+        .frame(height: 4)
+    }
+}
+
+// MARK: - Pace strip
+
+/// A one-line warning for the single most-pressured live window across all
+/// plans: when it will run dry at the current pace, and how much margin is left
+/// before its reset saves it.
+struct PaceStripView: View {
+    let sub: Subscription
+    let pace: Pace
+    let now: Date
+
+    var body: some View {
+        HStack(spacing: 9) {
+            Image(systemName: "exclamationmark.triangle.fill")
+                .font(.system(size: 11))
+                .foregroundStyle(Theme.amber)
+            (
+                Text("\(sub.label) runs dry ").foregroundStyle(Theme.text)
+                + Text(Fmt.clock(pace.projectedDryAt)).foregroundStyle(Theme.amber).bold()
+                + Text(" at this pace — \(Fmt.sinceLabel(seconds: pace.marginSeconds)) before reset")
+                    .foregroundStyle(Theme.text)
+            )
+            .font(Theme.label(11))
+            .fixedSize(horizontal: false, vertical: true)
+            Spacer(minLength: 0)
+        }
+        .padding(.horizontal, 13)
+        .padding(.vertical, 10)
+        .background(
+            RoundedRectangle(cornerRadius: 9, style: .continuous)
+                .fill(Theme.amber.opacity(0.10))
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 9, style: .continuous)
+                .strokeBorder(Theme.amber.opacity(0.22), lineWidth: 1)
+        )
     }
 }
 
 // MARK: - Agents section
 
+/// The running agents (already filtered to active by `HUDSnapshot.runningAgents`).
+/// Colors are assigned over exactly this set, and the section hides itself when
+/// nothing is running.
 struct AgentsSectionView: View {
     let agents: [Agent]
     let now: Date
 
     private var waiting: Int { agents.filter { $0.isWaiting }.count }
+    private var colors: [Int: Color] { AgentColors.assign(agents) }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            SectionRule(title: "AGENTS") {
-                if waiting > 0 {
-                    Text("\(waiting) needs you")
-                        .font(Theme.mono(10))
-                        .foregroundStyle(Theme.amber)
-                        .fixedSize()
+        if !agents.isEmpty {
+            VStack(alignment: .leading, spacing: 8) {
+                SectionRule(title: "AGENTS") {
+                    if waiting > 0 {
+                        Text("\(waiting) needs you")
+                            .font(Theme.mono(10))
+                            .foregroundStyle(Theme.amber)
+                            .fixedSize()
+                    }
                 }
-            }
-            ForEach(agents) { agent in
-                AgentRow(agent: agent, color: colors[agent.pid] ?? Theme.toolColor(agent.tool), now: now)
+                ForEach(agents) { agent in
+                    AgentRow(agent: agent, color: colors[agent.pid] ?? Theme.toolColor(agent.tool), now: now)
+                }
             }
         }
     }
-
-    // Same assignment the notch face uses, so a color in the bar is the same
-    // color on the row here.
-    private var colors: [Int: Color] { AgentColors.assign(agents) }
 }
 
 struct AgentRow: View {
@@ -235,6 +337,7 @@ struct AgentRow: View {
                     .font(Theme.label(12))
                     .foregroundStyle(agent.isWaiting ? Theme.amber : Theme.muted)
                     .lineLimit(1)
+                    .truncationMode(.tail)
             }
 
             Spacer(minLength: 8)
@@ -251,15 +354,16 @@ struct AgentRow: View {
             RoundedRectangle(cornerRadius: 8, style: .continuous)
                 .fill(agent.isWaiting ? Theme.amber.opacity(0.10) : Color.clear)
         )
-        // TODO(phase4): clicking a row should focus/resume this agent's session.
         .contentShape(Rectangle())
-        .onTapGesture { /* no-op for now */ }
+        .onTapGesture { AppActions.jumpToAgent(agent) }
     }
 }
 
-// MARK: - Value section
+// MARK: - Value strip
 
-struct ValueSectionView: View {
+/// The API-value readout as a trip-computer strip: equal segments for today,
+/// the month, and the value multiple, divided by hairlines.
+struct ValueStripView: View {
     let value: ValueBlock
     let now: Date
 
@@ -270,49 +374,48 @@ struct ValueSectionView: View {
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            SectionRule(title: "VALUE AT API RATES") {
-                if let m = value.multiple {
-                    Text("\(Fmt.multiple(m)) your subs")
-                        .font(Theme.mono(10))
-                        .foregroundStyle(Theme.green)
-                        .fixedSize()
-                }
-            }
-            HStack(spacing: 8) {
-                StatTile(caption: "TODAY", value: Fmt.usd(value.todayUSD))
-                StatTile(caption: monthName, value: Fmt.usd(value.monthUSD))
-                StatTile(
-                    caption: "SUBS COST",
-                    value: value.subsCostUSD.map(Fmt.usd) ?? "--"
+        VStack(alignment: .leading, spacing: 11) {
+            SectionRule(title: "VALUE AT API RATES")
+            HStack(spacing: 0) {
+                segment(caption: "TODAY", value: Fmt.usd(value.todayUSD), color: Theme.text)
+                divider
+                segment(caption: monthName, value: Fmt.usd(value.monthUSD), color: Theme.text)
+                divider
+                segment(
+                    caption: "MULTIPLE",
+                    value: value.multiple.map(Fmt.multiple) ?? "--",
+                    color: Theme.green
                 )
             }
+            .background(
+                RoundedRectangle(cornerRadius: 10, style: .continuous)
+                    .fill(Theme.panel2)
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 10, style: .continuous)
+                    .strokeBorder(Theme.hairline, lineWidth: 1)
+            )
         }
     }
-}
 
-struct StatTile: View {
-    let caption: String
-    let value: String
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 4) {
+    private func segment(caption: String, value: String, color: Color) -> some View {
+        VStack(alignment: .leading, spacing: 5) {
             Text(caption)
                 .font(Theme.label(9, weight: .semibold))
                 .tracking(1.0)
                 .foregroundStyle(Theme.muted)
             Text(value)
-                .font(Theme.mono(14, weight: .medium))
-                .foregroundStyle(Theme.text)
+                .font(Theme.mono(16, weight: .medium))
+                .foregroundStyle(color)
                 .monospacedDigit()
         }
         .frame(maxWidth: .infinity, alignment: .leading)
-        .padding(.horizontal, 12)
-        .padding(.vertical, 10)
-        .background(
-            RoundedRectangle(cornerRadius: 8, style: .continuous)
-                .fill(Theme.panel2)
-        )
+        .padding(.horizontal, 14)
+        .padding(.vertical, 11)
+    }
+
+    private var divider: some View {
+        Rectangle().fill(Theme.hairline).frame(width: 1)
     }
 }
 
@@ -328,8 +431,6 @@ struct FooterView: View {
                 .font(Theme.label(10))
                 .foregroundStyle(Theme.muted)
             Spacer()
-            // Quit: an accessory app has no dock icon or app menu, so the card
-            // (and the pill's right-click menu) are the only ways out.
             HStack(spacing: 4) {
                 Image(systemName: "power")
                     .font(.system(size: 9, weight: .semibold))
@@ -354,8 +455,6 @@ struct FooterView: View {
                             .strokeBorder(Theme.hairline, lineWidth: 1)
                     )
             }
-            // TODO(phase4): replace `open -a Warp` placeholder with the real
-            // agent-dash launch.
             .contentShape(Rectangle())
             .onTapGesture { AppActions.openAgentDash() }
         }
