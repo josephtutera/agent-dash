@@ -39,10 +39,23 @@ final class HUDViewTests: XCTestCase {
         XCTAssertEqual(sub(windows: [session, fable, weekly]).weekly7dWindow?.kind, "weekly_7d")
     }
 
-    func testMiniInnerRingIsTightestWeekly() {
-        let rings = sub(windows: [session, weekly, fable]).miniRings
-        XCTAssertEqual(rings.count, 2)
-        XCTAssertEqual(rings[1]?.kind, "weekly_fable")
+    // MARK: - Glance window derivation
+
+    func testGlanceWindowPrefersSession() {
+        let s = sub(windows: [weekly, session, fable])
+        XCTAssertEqual(s.glanceWindow?.kind, "session_5h")
+    }
+
+    func testGlanceWindowFallsBackToTightestThenFirst() {
+        // No session window: fall back to the sub's reported tightest.
+        let noSession = Subscription(
+            id: "s", provider: "claude", label: "S",
+            windows: [weekly, fable], tightest: fable, stale: nil, activeAgents: 0)
+        XCTAssertEqual(noSession.glanceWindow?.kind, "weekly_fable")
+
+        // No session and no tightest: fall back to the first window.
+        let bare = sub(windows: [weekly, fable])
+        XCTAssertEqual(bare.glanceWindow?.kind, "weekly_7d")
     }
 
     // MARK: - Agent identity colors

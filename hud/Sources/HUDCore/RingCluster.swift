@@ -3,9 +3,8 @@ import SwiftUI
 /// One concentric ring cluster, outermost ring first. Each ring fills by the
 /// consumed fraction of its window, colored by severity, drawn round-capped
 /// over a hairline track. A fully spent limit therefore renders as a complete
-/// solid ring. The two faces use the same view at different scales:
-///   menubar mini: [session, weekly] at 18pt
-///   notch face:   [session, weekly, fable] at 26pt (Codex has no fable ring)
+/// solid ring. Now used only by the popover's offline state (three dim rings);
+/// the menu-bar glance shows percentages and a fuel bar, not rings.
 public struct RingCluster: View {
     public let rings: [Window?]
     public var diameter: CGFloat = 18
@@ -61,54 +60,5 @@ public struct RingCluster: View {
                 .rotationEffect(.degrees(-90))
         }
         .padding(inset)
-    }
-}
-
-/// The menu-bar status-item content: one ring cluster per subscription (Team,
-/// Personal, Codex), each with its provider mark beside it — the Claude spark or
-/// the Codex knot — so you can tell the plans apart at a glance. Each cluster is
-/// the session ring outside, the tightest weekly inside, severity-colored, so a
-/// plan running dry reads without opening the card. Clicking the item opens the
-/// full card. Offline collapses to three dim rings.
-public struct MenuBarContentView: View {
-    public let snapshot: HUDSnapshot?
-    public var now: Date
-    /// The single monochrome color the whole glance draws in. The live status
-    /// item renders this to a *template* image (so AppKit tints it for contrast
-    /// over any wallpaper); the headless preview passes white to mimic that
-    /// result on a dark strip.
-    public var tint: Color
-
-    public init(snapshot: HUDSnapshot?, now: Date = Date(), tint: Color = .primary) {
-        self.snapshot = snapshot
-        self.now = now
-        self.tint = tint
-    }
-
-    // Fixed presentation order regardless of daemon ordering.
-    private static let order = ["claude-team", "claude-personal", "codex"]
-
-    private var orderedSubs: [Subscription] {
-        guard let snap = snapshot else { return [] }
-        return Self.order.compactMap { id in snap.subscriptions.first { $0.id == id } }
-    }
-
-    public var body: some View {
-        HStack(spacing: 11) {
-            if !orderedSubs.isEmpty {
-                ForEach(orderedSubs) { sub in
-                    HStack(spacing: 4) {
-                        BrandMark(provider: sub.provider, size: 15, tint: tint)
-                        RingCluster(rings: sub.miniRings, diameter: 18, strokeWidth: 2, tint: tint)
-                    }
-                }
-            } else {
-                ForEach(0..<3, id: \.self) { _ in
-                    RingCluster(session: nil, weekly: nil, diameter: 18, tint: tint).opacity(0.35)
-                }
-            }
-        }
-        .padding(.horizontal, 5)
-        .frame(height: 22)
     }
 }

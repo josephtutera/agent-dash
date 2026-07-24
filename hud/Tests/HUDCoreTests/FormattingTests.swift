@@ -64,6 +64,28 @@ final class FormattingTests: XCTestCase {
         XCTAssertEqual(Fmt.consumed(pctLeft: -20), 1.0, accuracy: 0.0001)
     }
 
+    // MARK: Remaining fraction (glance fuel bar)
+
+    func testRemainingFractionMatchesItsNumber() {
+        // The glance bar fills by what's LEFT, the inverse of `consumed`.
+        XCTAssertEqual(Fmt.remaining(pctLeft: 100), 1.0, accuracy: 0.0001)
+        XCTAssertEqual(Fmt.remaining(pctLeft: 74), 0.74, accuracy: 0.0001)
+        XCTAssertEqual(Fmt.remaining(pctLeft: 18), 0.18, accuracy: 0.0001)
+        XCTAssertEqual(Fmt.remaining(pctLeft: 0), 0.0, accuracy: 0.0001)
+    }
+
+    func testRemainingFractionClampsAndHandlesNull() {
+        XCTAssertEqual(Fmt.remaining(pctLeft: nil), 0.0, accuracy: 0.0001)
+        XCTAssertEqual(Fmt.remaining(pctLeft: 150), 1.0, accuracy: 0.0001)
+        XCTAssertEqual(Fmt.remaining(pctLeft: -20), 0.0, accuracy: 0.0001)
+    }
+
+    func testGlancePercentGlyph() {
+        XCTAssertEqual(Fmt.glancePercent(pctLeft: 18), "18")
+        XCTAssertEqual(Fmt.glancePercent(pctLeft: 0), "0")
+        XCTAssertEqual(Fmt.glancePercent(pctLeft: nil), "--")
+    }
+
     // MARK: Severity color mapping
 
     func testSeverityMapping() {

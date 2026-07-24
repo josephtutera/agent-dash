@@ -12,6 +12,22 @@ public enum Fmt {
         return Double(100 - clamped) / 100.0
     }
 
+    /// Remaining fraction of a limit, in 0...1, from percent remaining. This is
+    /// the fill for the menu-bar glance's micro fuel-bar, which reads as a fuel
+    /// gauge (a short bar means little left), so it matches its own number
+    /// rather than the popover meters, which fill by `consumed`. A null reading
+    /// is treated as empty.
+    public static func remaining(pctLeft: Int?) -> Double {
+        guard let pct = pctLeft else { return 0 }
+        return Double(min(100, max(0, pct))) / 100.0
+    }
+
+    /// The bare percent-remaining glyph the glance shows, e.g. "18" or "--".
+    /// No "%": the fuel bar beneath already reads it as a proportion.
+    public static func glancePercent(pctLeft: Int?) -> String {
+        pctLeft.map(String.init) ?? "--"
+    }
+
     /// Compact time-until-reset from now, per the design's countdown ladder:
     ///   < 1h   -> "37m"
     ///   < 1d   -> "2h06"   (hours, then zero-padded minutes)
