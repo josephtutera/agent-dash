@@ -20,13 +20,26 @@ public enum PreviewRenderer {
         snapshot: HUDSnapshot = .sample,
         now: Date = HUDSnapshot.previewNow,
         to url: URL,
-        scale: CGFloat = 2
+        scale: CGFloat = 2,
+        colorScheme: ColorScheme = .dark
     ) throws -> URL {
-        // A little breathing room around the card so the border isn't flush
-        // to the image edge, over the notch-black backdrop.
+        // Resolve the dynamic Theme colors against the requested appearance, both
+        // via the AppKit appearance (which backs the dynamic NSColors) and the
+        // SwiftUI environment, so the render matches what the live app shows.
+        #if canImport(AppKit)
+        let previousAppearance = NSApplication.shared.appearance
+        NSApplication.shared.appearance =
+            NSAppearance(named: colorScheme == .dark ? .darkAqua : .aqua)
+        defer { NSApplication.shared.appearance = previousAppearance }
+        #endif
+
+        // A little breathing room around the card so the border isn't flush to
+        // the image edge, over the appearance-appropriate desktop backdrop.
         let content = PopoverCard(snapshot: snapshot, now: now)
+            .environment(\.colorScheme, colorScheme)
             .padding(20)
             .background(Theme.notch)
+            .environment(\.colorScheme, colorScheme)
 
         return try write(content, to: url, scale: scale, opaque: true)
     }
@@ -41,6 +54,14 @@ public enum PreviewRenderer {
         to url: URL,
         scale: CGFloat = 2
     ) throws -> URL {
+        // A dark menu-bar-over-desktop demo, so pin the card to dark regardless
+        // of the host machine's system appearance.
+        #if canImport(AppKit)
+        let previousAppearance = NSApplication.shared.appearance
+        NSApplication.shared.appearance = NSAppearance(named: .darkAqua)
+        defer { NSApplication.shared.appearance = previousAppearance }
+        #endif
+
         let content = VStack(alignment: .trailing, spacing: 24) {
             // The glance on a dark menu-bar strip, right-aligned like the real
             // status area.
@@ -55,6 +76,7 @@ public enum PreviewRenderer {
 
             PopoverCard(snapshot: snapshot, now: now)
         }
+        .environment(\.colorScheme, .dark)
         .padding(40)
         .background(Color(hex: 0x1C1D21)) // --color-desktop from the artboards
 

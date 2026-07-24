@@ -3,7 +3,8 @@ import HUDCore
 
 // Entry point. Three modes:
 //   adash-hud                                   -> run the menu-bar HUD
-//   adash-hud --render-preview out.png          -> render the card to a PNG and exit
+//   adash-hud --render-preview out.png          -> render the card (dark) to a PNG
+//   adash-hud --render-preview-light out.png    -> render the card in light mode
 //   adash-hud --render-preview-menubar out.png  -> render the menu-bar glance and
 //                                                  its dropdown card, then exit
 // The preview modes are how reviewers (and CI) see the UI headlessly.
@@ -31,7 +32,10 @@ func runRender(_ flag: String, defaultName: String, render: @MainActor (URL) thr
 }
 
 runRender("--render-preview", defaultName: "preview.png") { url in
-    try PreviewRenderer.renderCardPNG(to: url, scale: 2)
+    try PreviewRenderer.renderCardPNG(to: url, scale: 2, colorScheme: .dark)
+}
+runRender("--render-preview-light", defaultName: "preview-light.png") { url in
+    try PreviewRenderer.renderCardPNG(to: url, scale: 2, colorScheme: .light)
 }
 runRender("--render-preview-menubar", defaultName: "preview-menubar.png") { url in
     try PreviewRenderer.renderMenubarPNG(to: url, scale: 2)

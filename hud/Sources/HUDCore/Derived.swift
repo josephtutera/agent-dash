@@ -39,15 +39,13 @@ extension Subscription {
         return rings
     }
 
-    /// The menubar mini rings: 5h session outside, the tightest weekly inside,
-    /// so a pressured Fable limit still reads at the 18pt scale where a third
-    /// ring would be too small to draw.
-    public var miniRings: [Window?] {
-        let weeklies = windows.filter { $0.isWeekly }
-        let tightestWeekly = weeklies.min { a, b in
-            (a.pctLeft ?? 101) < (b.pctLeft ?? 101)
-        }
-        return [sessionWindow, tightestWeekly ?? weeklyWindow]
+    /// The single window the menu-bar glance headlines: the 5h session, i.e.
+    /// the immediate "can I work right now" budget. Falls back to the tightest
+    /// window, then the first, so every subscription resolves to one number.
+    /// A dry weekly/Fable limit is not surfaced here by design; it reads in the
+    /// popover a click away, where every window is shown.
+    public var glanceWindow: Window? {
+        sessionWindow ?? tightest ?? windows.first
     }
 
     public var isIdle: Bool { activeAgents <= 0 }
@@ -103,6 +101,13 @@ public enum AgentColors {
 extension HUDSnapshot {
     public var waitingAgentCount: Int {
         agents.filter { $0.isWaiting }.count
+    }
+
+    /// Agents the card actually shows: currently working or waiting. Idle and
+    /// stale sessions are dropped so the list can't go out of date — it only
+    /// ever holds live work, ordered as the daemon sent it.
+    public var runningAgents: [Agent] {
+        agents.filter { !$0.isIdle }
     }
 
     /// The single tightest window across every subscription, spent limits
