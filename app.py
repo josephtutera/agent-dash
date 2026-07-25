@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import json
 import os
 import re
 import shlex
 import subprocess
 import sys
 import time
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from subprocess import DEVNULL, Popen
@@ -17,15 +19,19 @@ from rich.text import Text
 from textual import events, on, work
 from textual.app import App, ComposeResult
 from textual.binding import Binding
+from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.css.query import NoMatches
-from textual.widgets import DataTable, Footer, Input, Static
+from textual.screen import ModalScreen
+from textual.widgets import Input, Static
 
+import bridge
 from activity import enrich
 from agents import RunningAgent, running_agents
 from collectors import collect_all
 from models import (
     SPINNER_FRAMES as _SPINNER,
     TOOL_COLORS,
+    TOOLS,
     Session,
     fmt_tokens,
     rel_time,
@@ -35,7 +41,6 @@ from models import (
 from titles import TitleStore, apply_titles, generate_title
 from usage import ToolUsage, UsageWindow, claude_profiles, collect_usage
 
-BAR_WIDTH = 24
 # aligned subscriptions grid: fixed-width columns so every 5h bar lines up in
 # one column and every 7d bar in another, under a single header.
 USAGE_TOOL_W = 9  # colored tool name column (widest is "opencode" = 8)
@@ -46,13 +51,6 @@ USAGE_PCT_W = 4  # right-aligned percent, e.g. " 16%", "100%"
 # total visible width of one window cell (bar + space + pct + space + reset)
 USAGE_CELL_W = USAGE_BAR_W + 1 + USAGE_PCT_W + 1 + USAGE_RESET_W
 USAGE_GAP = "   "  # between the 5h and 7d columns
-MAX_ACTIVE_ROWS = 6
-BANNER_TEXT = "Agent Dash"
-BANNER_FONTS = ("slant", "small")  # widest first; each is measured before use
-# columns never available to the banner: its own padding (2 per side) plus the
-# screen's vertical scrollbar, assumed always present so the art still fits if
-# the scrollbar pops in after data loads
-BANNER_CHROME = 6
 # the launcher can start any agent CLI, or just a plain shell ("terminal")
 LAUNCH_TOOLS = ("claude", "codex", "opencode", "gemini", "terminal")
 # braille spinner frames for the "working" indicator, like the CLIs themselves
@@ -77,38 +75,29 @@ USAGE_POLL_SECONDS = 180.0
 # panel runs its needle sweep at ignition. _boot goes 0 -> 1 over these seconds.
 BOOT_SWEEP_SECONDS = 0.85
 _BOOT_PEAK = 0.55  # fraction of the sweep spent rising to the peg before settling
+# Below this the two panes stop being readable, so the detail pane steps aside
+# rather than the app telling you your terminal is the wrong shape.
+NARROW_COLUMNS = 100
+CONFIG_PATH = Path.home() / ".config" / "agent-dash" / "config.json"
 
 
-def _trim_descenders(art: str) -> str:
-    """Drop trailing figlet lines that are just a descender tail — the hanging
-    "/____/" that slant leaves under a lowercase g/y/p. Without this the banner
-    shows an orphaned fragment floating below the word; trimming lets it sit
-    cleanly on its baseline. Stops at the first dense (full-height) line."""
-    lines = art.split("\n")
-    body = max((len(line.replace(" ", "")) for line in lines), default=0)
-    while len(lines) > 1:
-        ink = len(lines[-1].replace(" ", ""))
-        if ink == 0 or ink * 3 < body:  # blank, or well under the densest line
-            lines.pop()
-        else:
-            break
-    return "\n".join(lines)
-
-
-def _banner_art(width: int) -> str:
-    """Figlet art for the banner that fits in `width` columns, or "" when no
-    font does. Art that is even one column too wide gets word-wrapped by the
-    Static, which shreds it into diagonal fragments, so measure before using."""
+def _load_theme_pref() -> str:
+    """A theme toggle you have to re-apply on every launch is a party trick, so
+    the choice is remembered. A missing or unreadable config is not worth a
+    warning: fall back to dark and carry on."""
     try:
-        import pyfiglet
-
-        for font in BANNER_FONTS:
-            art = _trim_descenders(pyfiglet.figlet_format(BANNER_TEXT, font=font).rstrip())
-            if art and max(len(line) for line in art.splitlines()) <= width:
-                return art
+        name = json.loads(CONFIG_PATH.read_text()).get("theme")
     except Exception:
-        pass
-    return ""
+        return bridge.DEFAULT_THEME
+    return name if name in bridge.THEMES else bridge.DEFAULT_THEME
+
+
+def _save_theme_pref(name: str) -> None:
+    try:
+        CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
+        CONFIG_PATH.write_text(json.dumps({"theme": name}))
+    except OSError:
+        pass  # a read-only home should not stop you flipping the lights
 
 
 def _truncate(text: str, width: int) -> str:
@@ -118,13 +107,6 @@ def _truncate(text: str, width: int) -> str:
 def _usage_color(pct: float) -> str:
     # instrument palette: calm blue until it runs warm, then amber, then red
     return "#7aa2f7" if pct < 60 else "#ffb454" if pct < 85 else "#ff5c57"
-
-
-def _bar(pct: float | None, width: int = BAR_WIDTH) -> str:
-    if pct is None:
-        return f"[dim]{'░' * width} n/a[/]"
-    filled = round(width * min(pct, 100.0) / 100.0)
-    return f"[{_usage_color(pct)}]{'█' * filled}[/][#1b2233]{'░' * (width - filled)}[/] {pct:.0f}%"
 
 
 def _fmt_reset_compact(dt: datetime | None) -> str:
@@ -189,31 +171,6 @@ def _window_cell(win: "UsageWindow | None", progress: float = 1.0) -> str:
 def _pad_visible(markup: str, visible_len: int, width: int) -> str:
     """Right-pad a markup string to `width` visible columns."""
     return markup + " " * max(0, width - visible_len)
-
-
-def _status_marker(state: str, frame: str, tool_color: str) -> str:
-    """Leading glyph for an active-now row based on live state."""
-    if state == "working":
-        return f"[#7aa2f7]{frame}[/]"
-    if state == "waiting":
-        return "[#ffb454]●[/]"
-    if state == "idle":
-        return "[#55647f]○[/]"
-    return f"[{tool_color}]●[/{tool_color}]"  # unknown: fall back to the tool dot
-
-
-def _activity_detail(agent) -> str:
-    """Second-line detail (current action + live tokens) for a busy agent."""
-    if agent.state not in ("working", "waiting"):
-        return ""
-    bits = []
-    if agent.state == "waiting":
-        bits.append(f"[#ffb454]{escape(agent.label or 'waiting for input')}[/]")
-    elif agent.label:
-        bits.append(f"[#7aa2f7]{escape(agent.label)}[/]")
-    if agent.tokens:
-        bits.append(f"[dim]{fmt_tokens(agent.tokens)} tokens[/]")
-    return " · ".join(bits)
 
 
 _TAB_COLORS = {"claude": "magenta", "codex": "green", "opencode": "blue", "gemini": "cyan", "terminal": "blue"}
@@ -368,115 +325,168 @@ def _write_tab_config(tool: str, cwd: str, configs_dir: Path, suffix: str = "", 
     return stem
 
 
-class _SessionsTable(DataTable):
-    """History table that never takes keyboard focus.
+@dataclass
+class Entry:
+    """One row of the single list.
 
-    All navigation is driven by AdashApp.on_key so the launcher/active/history
-    zones share one selection chain. Under Textual 8 a focusable DataTable gets
-    auto-focused at mount and its built-in cursor keys fire alongside on_key,
-    double-moving the cursor and desyncing the zone state. Keeping it
-    unfocusable (together with clearing focus at mount and only focusing the
-    search box while it is open) means every key reaches on_key or a binding.
+    The old screen had four zones (launcher, directory picker, active-now,
+    history) chained together by arrow keys, which meant four cursors to keep
+    in sync and a mental model you had to be taught. There is now one list, so
+    there is one cursor, and `key` is what keeps it steady: the active poll
+    rebuilds this list every two seconds, and re-finding the selection by
+    identity rather than by index is the difference between the cursor staying
+    where you left it and it sliding out from under your hands.
     """
 
-    can_focus = False
+    kind: str  # "agent" | "session"
+    key: str
+    agent: RunningAgent | None = None
+    session: Session | None = None
 
 
-class _ActivePanel(Static):
-    """Active-now panel where clicking a row jumps to that agent's Warp tab.
+class _ListPane(Static):
+    """The left pane, where clicking a row selects it the way arrowing does.
 
-    The click is handled here rather than in AdashApp.on_click: under Textual 8
-    mouse events are delivered to the widget under the cursor and don't reach
-    app-level handlers the way keys do. event.y is relative to the panel's
-    border, so content rows start at y=2 (border + top padding).
+    Click lands here rather than on the app: under Textual 8 mouse events go to
+    the widget under the cursor and never reach app-level handlers, unlike keys.
     """
 
     def on_click(self, event: events.Click) -> None:
         app = self.app
-        if not isinstance(app, AdashApp) or not app.running:
+        if not isinstance(app, AdashApp):
             return
-        idx = app._agent_at_line(event.y - 2)
-        if idx is None:
+        index = app._entry_at_line(event.y)
+        if index is None:
             return
-        app.active_idx = idx
-        app._set_zone("active")
-        app._focus_agent(app.running[idx])
+        already_selected = index == app.cursor
+        app._cursor_moved = True
+        app.cursor = index
+        app.mode = "browse"
+        app._render_all()
+        if already_selected:
+            app.action_primary()  # second click on the same row commits it
+
+
+class _OverlayScreen(ModalScreen):
+    """A dismiss-on-any-key panel. Used for `?` (the full keymap) and `u` (the
+    usage grid) — the two things worth having on demand and not worth spending
+    permanent screen space on."""
+
+    def __init__(self, body: str, title: str) -> None:
+        super().__init__()
+        self._body = body
+        self._title = title
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="overlay"):
+            yield Static(self._title, id="overlay-title")
+            yield Static(self._body, id="overlay-body")
+            yield Static("any key closes", id="overlay-hint")
+
+    def on_key(self, event) -> None:
+        event.stop()
+        self.dismiss()
+
+    def on_click(self) -> None:
+        self.dismiss()
 
 
 class AdashApp(App):
     TITLE = "Agent Dash"
 
+    # Colours come from bridge.THEMES via get_css_variables, so a theme switch
+    # is a variable swap and a refresh_css() rather than a second stylesheet.
     CSS = """
-    Screen {
-        background: #0a0c12;
-        color: #c7d4f0;
+    Screen { background: $ad-ground; color: $ad-text; }
+    #header { height: 3; padding: 1 3 0 3; border-bottom: solid $ad-rule; }
+    #body { height: 1fr; }
+    #list {
+        width: 54;
+        border-right: solid $ad-rule;
+        padding: 1 2 1 1;
+        scrollbar-size-vertical: 1;
     }
-    #banner {
+    #listbody { height: auto; }
+    #detail { width: 1fr; padding: 1 3 0 3; }
+    #detailscroll { height: 1fr; scrollbar-size-vertical: 1; }
+    #detailbody { height: auto; }
+    #action { height: auto; padding: 1 0 1 0; }
+    #footer { height: 2; padding: 0 3; border-top: solid $ad-rule; }
+    /* Under ~100 columns two panes stop being readable, so the detail pane
+       steps aside and the list takes the width. The action sentence moves to
+       the footer, which keeps the one promise the layout makes. */
+    Screen.narrow #detail { display: none; }
+    Screen.narrow #list { width: 1fr; border-right: none; }
+    #overlay {
+        width: 78;
         height: auto;
-        padding: 1 2 0 2;
-        text-align: center;
-        color: #7aa2f7;
+        max-height: 90%;
+        background: $ad-raised;
+        border: solid $ad-rule;
+        padding: 1 3;
     }
-    .panel {
-        height: auto;
-        border: round #1b2233;
-        padding: 1 2;
-        margin: 0 1;
-    }
-    #launch {
-        height: auto;
-        padding: 1 2 0 2;
-    }
-    #picker {
-        height: auto;
-        padding: 0 2 1 4;
-    }
-    #sessions {
-        height: 1fr;
-        min-height: 6;
-        margin: 0 1 1 1;
-        border: solid #1b2233;
-    }
-    #sessions > .datatable--cursor {
-        background: #16305e;
-        color: #ffffff;
-    }
-    #sessions > .datatable--header {
-        color: #55647f;
-        text-style: none;
-    }
-    #search {
-        margin: 0 1;
-    }
-    #dirinput {
-        margin: 0 1;
-    }
-    Footer {
-        background: #0a0c12;
-    }
+    #overlay-title { color: $ad-text; text-style: bold; padding-bottom: 1; }
+    #overlay-hint { color: $ad-text-dim; padding-top: 1; }
+    #search, #dirinput { margin: 0 3; border: none; background: $ad-raised; }
     """
 
+    # The footer shows four of these. Everything else is real but lives behind
+    # ?, because a footer with twelve keys on it is a footer nobody reads.
     BINDINGS = [
-        ("q", "quit", "quit"),
-        ("/", "search", "search"),
-        ("1", "filter_all", "all"),
-        ("2", "filter_claude", "claude"),
-        ("3", "filter_codex", "codex"),
-        ("4", "filter_opencode", "opencode"),
-        ("5", "filter_gemini", "gemini"),
-        ("c", "new_claude", "new claude"),
-        ("x", "new_codex", "new codex"),
-        ("o", "new_opencode", "new opencode"),
-        ("g", "new_gemini", "new gemini"),
-        ("t", "new_terminal", "terminal"),
+        Binding("q", "quit", "quit", show=False),
+        Binding("slash", "search", "search", show=False),
+        Binding("n", "new_session", "new session", show=False),
+        Binding("question_mark", "keymap", "keys", show=False),
+        Binding("1", "filter_all", "all", show=False),
+        Binding("2", "filter_claude", "claude", show=False),
+        Binding("3", "filter_codex", "codex", show=False),
+        Binding("4", "filter_opencode", "opencode", show=False),
+        Binding("5", "filter_gemini", "gemini", show=False),
+        Binding("c", "new_claude", "new claude", show=False),
+        Binding("x", "new_codex", "new codex", show=False),
+        Binding("o", "new_opencode", "new opencode", show=False),
+        Binding("g", "new_gemini", "new gemini", show=False),
+        Binding("t", "new_terminal", "terminal", show=False),
+        Binding("y", "copy_resume", "copy resume command", show=False),
+        Binding("u", "usage", "usage", show=False),
+        Binding("T", "toggle_theme", "light / dark", show=False),
         Binding("tab", "switch_plan", "switch plan", priority=True),
-        ("C", "clear", "clear history"),
-        ("u", "undo", "undo"),
-        ("r", "refresh", "refresh"),
+        Binding("C", "clear", "clear history", show=False),
+        Binding("U", "undo", "undo", show=False),
+        Binding("r", "refresh", "refresh", show=False),
         Binding("escape", "escape", show=False),
     ]
 
-    def __init__(self, cmd_file: str | None = None, limit: int = 300):
+    #: What ? shows, in the order it shows it. Kept next to BINDINGS so the two
+    #: are edited together and the overlay can never go stale.
+    KEYMAP_HELP = (
+        ("moving around", [
+            ("\u2191 \u2193", "move through the list"),
+            ("\u23ce", "do what the detail pane says"),
+            ("/", "search titles, prompts and projects"),
+            ("1\u20135", "show all / claude / codex / opencode / gemini"),
+        ]),
+        ("starting work", [
+            ("n", "new session"),
+            ("c x o g t", "new claude / codex / opencode / gemini / shell"),
+            ("tab", "switch the active claude plan"),
+        ]),
+        ("the selected row", [
+            ("y", "copy the resume command"),
+        ]),
+        ("the dashboard", [
+            ("u", "subscription usage"),
+            ("T", "switch light / dark"),
+            ("r", "refresh now"),
+            ("C / U", "clear history / undo"),
+            ("q", "quit"),
+        ]),
+    )
+
+    def __init__(self, cmd_file: str | None = None, limit: int = 300, theme_name: str | None = None):
+        # set before super(): App.__init__ builds the stylesheet, which calls
+        # get_css_variables, which needs to know which palette we are on
+        self.theme_name = theme_name or _load_theme_pref()
         super().__init__()
         self.cmd_file = cmd_file
         self.limit = limit
@@ -493,58 +503,69 @@ class AdashApp(App):
         # session id; in_flight guards against re-queuing a session mid-generation.
         self._title_store = TitleStore()
         self._titling_in_flight: set[str] = set()
-        # unified selection chain: launch(chips) -> picker(dirs) -> active -> history
-        self.zone = "launch"
+        # one list, one cursor: entries is agents-then-sessions, cursor indexes
+        # it, and mode says whether the detail pane is describing the selection
+        # or standing in as the launcher.
+        self.entries: list[Entry] = []
+        self.cursor = 0
+        self.mode = "browse"  # "browse" | "launcher"
+        self._line_index: dict[int, int] = {}  # list line -> entry index, for clicks
+        self._loaded = False  # first history load done: separates "scanning" from "empty"
+        # Until you move the cursor yourself it stays pinned to the top row, so
+        # a live agent arriving a second after boot gets the selection instead
+        # of leaving you looking at whatever history happened to load first.
+        # Once you have moved it, identity preservation takes over and nothing
+        # is allowed to shift it.
+        self._cursor_moved = False
         self.launch_idx = 0  # starts on claude
-        self.active_idx = 0
-        self.dirs: list[tuple[str, int, datetime | None]] = []  # directory picker rows
+        self.dirs: list[tuple[str, int, datetime | None]] = []  # directory rows
         self.picker_idx = 0  # highlighted directory; enter opens exactly this one
-        self.picker_opened: list[str] = []  # dirs opened this run, for footer feedback
+        self.picker_opened: list[str] = []  # dirs opened this run, echoed in the pane
         self._spin = 0  # spinner frame for working agents
         self.active_claude: str | None = None  # active claude plan label (multi-account)
         # Clearing history only hides sessions for the current run. It used to
         # persist to disk and reload on every launch, so an accidental C wiped
-        # the view permanently with no obvious way back — relaunching now always
-        # restores the full history.
+        # the view permanently with no obvious way back.
         self.cleared_at: datetime | None = None
-        # boot self-test sweep: 1.0 means "settled" (true readings) so any render
-        # before the animation shows real values; the first usage load drops it to
-        # 0.0 and animates it back to 1.0, sweeping every gauge on the way up.
         self._boot = 1.0
         self._boot_started = False
         self._boot_timer = None
 
     def compose(self) -> ComposeResult:
-        yield Static(id="banner")
-        yield Static("loading usage…", id="usage", classes="panel")
-        yield Static(id="launch")
-        yield Static(id="picker")
-        # active-now sits below the launcher so the visual order matches the
-        # keyboard chain (launch -> picker -> active -> history) you move through.
-        yield _ActivePanel("scanning processes…", id="active", classes="panel")
-        yield _SessionsTable(id="sessions", cursor_type="none", zebra_stripes=True)
-        yield Input(placeholder="search titles, prompts, projects…  (esc to close)", id="search")
-        yield Input(placeholder="directory path to open…  (~ ok · enter opens · esc cancels)", id="dirinput")
-        yield Footer()
+        yield Static(id="header")
+        with Horizontal(id="body"):
+            with VerticalScroll(id="list"):
+                yield _ListPane(id="listbody")
+            with Vertical(id="detail"):
+                with VerticalScroll(id="detailscroll"):
+                    yield Static(id="detailbody")
+                yield Static(id="action")
+        yield Static(id="footer")
+        yield Input(placeholder="search titles, prompts, projects\u2026  (esc to close)", id="search")
+        yield Input(placeholder="directory path to open\u2026  (~ ok \u00b7 enter opens \u00b7 esc cancels)", id="dirinput")
+
+    # ------------------------------------------------------------- theming
+
+    def get_css_variables(self) -> dict[str, str]:
+        """Textual resolves $ad-* from here, so switching themes is one dict
+        swap plus a refresh_css() rather than a second stylesheet."""
+        variables = super().get_css_variables()
+        variables.update(bridge.css_variables(self.theme_obj))
+        return variables
+
+    @property
+    def theme_obj(self) -> bridge.Theme:
+        return bridge.THEMES.get(self.theme_name, bridge.THEMES[bridge.DEFAULT_THEME])
 
     def on_mount(self) -> None:
-        table = self.query_one("#sessions", DataTable)
-        table.add_columns("tool", "title", "project", "active", "msgs", "tokens")
-        table.can_focus = False
-        search = self.query_one("#search", Input)
-        search.display = False
-        search.can_focus = False  # only focusable while the search box is open
-        dirinput = self.query_one("#dirinput", Input)
-        dirinput.display = False
-        dirinput.can_focus = False  # only focusable while the path prompt is open
-        self.set_focus(None)  # keys flow to on_key / bindings, not an auto-focused widget
-        self.query_one("#active", Static).border_title = "active now"
-        self.query_one("#usage", Static).border_title = "subscriptions"
-        self._render_banner()
-        self._power_on_banner()
+        for widget_id in ("#search", "#dirinput"):
+            field = self.query_one(widget_id, Input)
+            field.display = False
+            field.can_focus = False  # only focusable while it is open
+        self.set_focus(None)  # keys flow to on_key / bindings, not a focused widget
         self.dirs = self._recent_dirs()
-        self._render_launch()
-        self._render_picker()
+        self._apply_width()
+        self._render_all()
         self.load_sessions()
         self.load_usage()
         self.load_running()
@@ -558,187 +579,304 @@ class AdashApp(App):
     def _animate_active(self) -> None:
         if any(a.state == "working" for a in self.running):
             self._spin += 1
-            self._render_active()
+            self._render_list()
 
-    # ------------------------------------------------------------- boot sweep
+    def _apply_width(self) -> None:
+        """Two panes need room. Rather than tell you your terminal is wrong,
+        drop the detail pane and give the list the width; the action sentence
+        moves into the footer so Enter still announces itself."""
+        self.screen.set_class((self.size.width or 120) < NARROW_COLUMNS, "narrow")
 
-    def _power_on_banner(self) -> None:
-        """Fade the banner up from dark, like an instrument display lighting up.
-        Opacity is a style, not content, so this never touches the figlet art."""
+    @property
+    def narrow(self) -> bool:
+        return (self.size.width or 120) < NARROW_COLUMNS
+
+    # ------------------------------------------------------------- rendering
+
+    def _render_all(self) -> None:
+        self._render_header()
+        self._render_list()
+        self._render_detail()
+        self._render_footer()
+
+    def _update(self, widget_id: str, markup: str) -> None:
+        """Set a panel's contents, tolerating a poll that lands mid-teardown."""
         try:
-            banner = self.query_one("#banner", Static)
-            banner.styles.opacity = 0.0
-            banner.styles.animate("opacity", value=1.0, duration=0.5)
-        except Exception:
-            pass  # animation is decorative; never let it block boot
-
-    def _start_boot_sweep(self) -> None:
-        """Run the gauge self-test: sweep _boot 0 -> 1 and re-render each frame."""
-        self._boot = 0.0
-        step = 1.0 / 30.0  # ~30fps
-        self._boot_timer = self.set_interval(step, lambda: self._advance_boot(step))
-
-    def _advance_boot(self, step: float) -> None:
-        self._boot = min(1.0, self._boot + step / BOOT_SWEEP_SECONDS)
-        try:
-            self._render_usage()
+            self.query_one(widget_id, Static).update(markup)
         except NoMatches:
-            # the app is tearing down and the panel is already gone; the 30fps
-            # tick can outlive the widget tree, so stop sweeping instead of raising
-            self._boot = 1.0
-        if self._boot >= 1.0 and self._boot_timer is not None:
-            self._boot_timer.stop()
-            self._boot_timer = None
+            pass
 
-    # ------------------------------------------------------------- chrome
-
-    def _render_banner(self) -> None:
-        banner = self.query_one("#banner", Static)
-        art = _banner_art(self.size.width - BANNER_CHROME)
-        banner.update(f"[bold]{escape(art)}[/]" if art else f"[bold]◆ {BANNER_TEXT}[/]")
-
-    def _render_launch(self) -> None:
+    def _render_header(self) -> None:
+        theme = self.theme_obj
+        if self.query:
+            self._update("#header", bridge.search_header(
+                theme, self.query, len(self.filtered), len(self.sessions)))
+            return
+        name = f"[{theme.text}][bold]agent-dash[/bold][/]"
         chips = []
-        for i, tool in enumerate(LAUNCH_TOOLS):
-            if tool == "terminal":
-                color, glyph = "#55647f", "$"
+        for tool in ("all",) + TOOLS:
+            if tool == self.tool_filter:
+                chips.append(f"[{theme.accent}][bold]{tool}[/bold][/]")
             else:
-                color, glyph = TOOL_COLORS[tool], "●"
-            label = f"[{color}]{glyph}[/{color}] {tool}"
-            if self.zone == "launch" and i == self.launch_idx:
-                chips.append(f"[reverse bold] {label} [/]")
-            else:
-                chips.append(f"  {label} ")
-        hint = "[dim]← → select · ↓ choose directories · enter opens[/]"
-        self.query_one("#launch", Static).update(
-            "[bold]new session[/]   " + "".join(chips) + "   " + hint
-        )
+                chips.append(f"[{theme.text_dim}]{tool}[/]")
+        right = f"[{theme.text_dim}]/ to search[/]"
+        if self.cleared_at:
+            right = f"[{theme.waiting}]history cleared \u00b7 U restores[/]"
+        left = f"{name}  " + "  ".join(chips)
+        self._update("#header", f"{left}    {right}")
 
-    def _render_picker(self) -> None:
-        tool = LAUNCH_TOOLS[self.launch_idx]
-        rows = []
-        for i, (path, count, last) in enumerate(self.dirs):
-            disp = path.replace(str(Path.home()), "~")
-            meta = "current" if i == 0 else rel_time(last) if last else ""
-            if count:
-                meta = f"{meta} · {count} session{'s' if count != 1 else ''}" if meta else f"{count} sessions"
-            row = f"{escape(_truncate(disp, 50))}   [dim]{meta}[/]"
-            if self.zone == "picker" and i == self.picker_idx:
-                rows.append(f"[reverse] ▸ {row} [/]")
-            else:
-                rows.append(f"   {row}")
-        other = "[#7aa2f7]+[/] open another directory…"
-        if self.zone == "picker" and self.picker_idx == len(self.dirs):
-            rows.append(f"[reverse] ▸ {other} [/]")
-        else:
-            rows.append(f"   {other}")
-        # no checkboxes: enter opens the highlighted dir and leaves the picker up,
-        # so several tabs is just several presses. the footer echoes what opened.
-        verb = "open" if tool != "terminal" else "shell in"
-        footer = f"[dim]launch {tool} in[/]   [#7aa2f7]⏎ {verb}[/]"
-        if self.picker_opened:
-            names = ", ".join(Path(p).name or p for p in self.picker_opened)
-            footer += f"   [dim]opened: {escape(_truncate(names, 46))}[/]"
-        rows.append(footer)
+    def _list_width(self) -> int:
         try:
-            self.query_one("#picker", Static).update("\n".join(rows))
+            return max(30, self.query_one("#list").size.width - 3)
+        except (NoMatches, AttributeError):
+            return 50
+
+    def _render_list(self) -> None:
+        theme = self.theme_obj
+        width = self._list_width()
+        lines: list[str] = []
+        self._line_index = {}
+        seen_kind = None
+        for index, entry in enumerate(self.entries):
+            if entry.kind != seen_kind:
+                if seen_kind is not None:
+                    lines.append("")
+                heading = "running now" if entry.kind == "agent" else "earlier"
+                lines.append(bridge.label(heading, theme, strong=(entry.kind == "agent")))
+                lines.append("")
+                seen_kind = entry.kind
+            selected = index == self.cursor and self.mode == "browse"
+            if entry.kind == "agent":
+                row = bridge.agent_row(entry.agent, self._title_for(entry.agent),
+                                       selected=selected, theme=theme)
+            else:
+                row = bridge.session_row(entry.session, selected=selected)
+            rendered = bridge.render_row(row, theme, width)
+            for offset in range(len(rendered.splitlines())):
+                self._line_index[len(lines) + offset] = index
+            lines.extend(rendered.splitlines())
+            lines.append("")
+        if not self.entries:
+            lines = [f"[{theme.text_dim}]{'scanning\u2026' if not self._loaded else 'nothing here yet'}[/]"]
+        self._update("#listbody", "\n".join(lines))
+
+    def _entry_at_line(self, line: int) -> int | None:
+        return self._line_index.get(line)
+
+    @property
+    def current(self) -> Entry | None:
+        if 0 <= self.cursor < len(self.entries):
+            return self.entries[self.cursor]
+        return None
+
+    def _usage_note(self, tool: str) -> str:
+        """The one usage figure that is relevant to what is selected. The full
+        grid lives behind u; a dashboard that shows you every window all the
+        time is showing you four numbers you did not ask for."""
+        for usage in self.usages:
+            if usage.tool != tool:
+                continue
+            windows = [w for w in usage.windows if w.pct is not None]
+            if not windows:
+                return usage.note or ""
+            window = windows[-1]
+            reset = _fmt_reset_compact(window.resets_at)
+            return f"{window.label} {window.pct:.0f}%" + (f" \u00b7 resets {reset}" if reset else "")
+        return ""
+
+    def _render_detail(self) -> None:
+        theme = self.theme_obj
+        if self.mode == "launcher":
+            self._update("#detailbody", bridge.launcher(
+                theme, LAUNCH_TOOLS, self.launch_idx, self.dirs, self.picker_idx,
+                self.picker_opened, plan_label=self._plan_label(),
+                plan_hint=self._plan_hint(), include_action=False))
+            sentence = bridge.launch_sentence(LAUNCH_TOOLS, self.launch_idx,
+                                              self.dirs, self.picker_idx)
+            self._update("#action", bridge.action_bar(
+                theme, "\u23ce", sentence, "stays open for the next one"))
+            return
+        entry = self.current
+        if entry is None:
+            self._update("#detailbody", bridge.detail_empty(theme))
+            self._update("#action", bridge.action_bar(theme, "n", "start an agent somewhere"))
+            return
+        if entry.kind == "agent":
+            agent = entry.agent
+            session = self._session_for(agent)
+            body = bridge.detail_running(agent, session, theme, self._usage_note(agent.tool))
+            action = bridge.action_bar(theme, "\u23ce", "jump to this tab in Warp", agent.tty)
+        else:
+            session = entry.session
+            body = bridge.detail_session(session, theme, self._usage_note(session.tool))
+            action = bridge.action_bar(theme, "\u23ce", "resume in a new Warp tab",
+                                       Path(resume_directory(session)).name)
+        self._update("#detailbody", body)
+        self._update("#action", action)
+
+    def _render_footer(self) -> None:
+        theme = self.theme_obj
+        hints = [("\u23ce", self._action_words()), ("n", "new session"),
+                 ("/", "search"), ("?", "all keys")]
+        self._update("#footer", bridge.hint_line(theme, hints))
+
+    def _action_words(self) -> str:
+        """What Enter does, in three words. In a narrow terminal this is the
+        only place the promise survives, so it is never allowed to be vague."""
+        if self.mode == "launcher":
+            return bridge.launch_sentence(LAUNCH_TOOLS, self.launch_idx,
+                                          self.dirs, self.picker_idx)
+        entry = self.current
+        if entry is None:
+            return "nothing selected"
+        return "jump to the tab" if entry.kind == "agent" else "resume this session"
+
+    def _session_for(self, agent: RunningAgent) -> Session | None:
+        """The history row behind a live agent, so the detail pane can show the
+        prompt and message count the process itself does not know."""
+        if agent.session_id:
+            for session in self.sessions:
+                if session.id == agent.session_id:
+                    return session
+        for session in self.sessions:
+            if session.tool == agent.tool and session.project_dir == agent.cwd:
+                return session
+        return None
+
+    def _plan_label(self) -> str:
+        labels = [u.label for u in self.usages if u.tool == "claude" and u.label]
+        if not labels:
+            return ""
+        return self.active_claude or labels[0]
+
+    def _plan_hint(self) -> str:
+        labels = [u.label for u in self.usages if u.tool == "claude" and u.label]
+        if len(labels) < 2:
+            return ""
+        active = self.active_claude or labels[0]
+        nxt = labels[(labels.index(active) + 1) % len(labels)] if active in labels else labels[0]
+        return f"tab switches to {nxt}"
+
+    # ------------------------------------------------------------- the cursor
+
+    def _cursor_key(self) -> str | None:
+        entry = self.current
+        return entry.key if entry else None
+
+    def _restore_cursor(self, key: str | None) -> None:
+        """Put the cursor back on the row it was on. The active poll rebuilds
+        the list every two seconds and a new session arriving at the top would
+        otherwise drag the selection onto a different row under your hands."""
+        if not self._cursor_moved:
+            self.cursor = 0  # you have not chosen anything yet; follow the top
+            return
+        if key is None:
+            self.cursor = min(self.cursor, max(0, len(self.entries) - 1))
+            return
+        for index, entry in enumerate(self.entries):
+            if entry.key == key:
+                self.cursor = index
+                return
+        self.cursor = min(self.cursor, max(0, len(self.entries) - 1))
+
+    def _rebuild(self) -> None:
+        """Rebuild the single list: live agents first, then filtered history."""
+        previous = self._cursor_key()
+        self.filtered = [s for s in self.sessions if self._matches(s)]
+        entries = [Entry("agent", f"agent:{a.tool}:{a.pid}", agent=a) for a in self.running]
+        # A running agent and its own history row are the same piece of work.
+        # The old screen listed both, once under "active now" and again at the
+        # top of the table, so the first thing you did on every refresh was
+        # read the same three sessions twice. Live wins; the row is dropped.
+        live = {id(s) for s in (self._session_for(a) for a in self.running) if s is not None}
+        entries += [Entry("session", f"session:{s.id}", session=s)
+                    for s in self.filtered if id(s) not in live]
+        self.entries = entries
+        self._restore_cursor(previous)
+        self._render_all()
+
+    def _populate(self) -> None:
+        """Kept as the name the history/search/filter paths already call."""
+        self._rebuild()
+
+    def _render_active(self) -> None:
+        """Kept as the name the activity poll already calls."""
+        self._rebuild()
+
+    def _move(self, delta: int) -> None:
+        if not self.entries:
+            return
+        self._cursor_moved = True
+        self.cursor = max(0, min(len(self.entries) - 1, self.cursor + delta))
+        self._render_list()
+        self._render_detail()
+        self._render_footer()
+        self._scroll_to_cursor()
+
+    def _scroll_to_cursor(self) -> None:
+        """Rows are a fixed three lines, so the cursor's line is arithmetic."""
+        try:
+            pane = self.query_one("#list", VerticalScroll)
         except NoMatches:
-            pass  # a refresh landed mid-teardown; nothing to draw
+            return
+        for line, index in self._line_index.items():
+            if index == self.cursor:
+                pane.scroll_to(y=max(0, line - 4), animate=False)
+                return
 
-    # ------------------------------------------------------------- selection chain
-
-    def _set_zone(self, zone: str) -> None:
-        self.zone = zone
-        table = self.query_one("#sessions", DataTable)
-        table.cursor_type = "row" if zone == "history" else "none"
-        if zone == "history" and self.filtered:
-            table.move_cursor(row=min(table.cursor_row or 0, len(self.filtered) - 1))
-        self.active_idx = min(self.active_idx, max(0, len(self.running) - 1))
-        self._render_launch()
-        self._render_picker()
-        self._render_active()
-
-    def _enter_history_top(self, table) -> None:
-        self._set_zone("history")
-        if self.filtered:
-            table.move_cursor(row=0)
+    # ------------------------------------------------------------- keyboard
 
     def on_key(self, event) -> None:
         if len(self.screen_stack) > 1:
-            return  # a modal owns the keyboard
+            return  # an overlay owns the keyboard
         if self.query_one("#search", Input).display:
-            return  # the search box owns the keyboard while it's open
+            return  # the search box owns the keyboard while it is open
         if self.query_one("#dirinput", Input).display:
-            return  # the path prompt owns the keyboard while it's open
+            return  # the path prompt owns the keyboard while it is open
         key = event.key
         if key not in ("enter", "left", "right", "up", "down"):
             return
-        event.stop()  # keep the DataTable's own arrow-key bindings from also firing
-        table = self.query_one("#sessions", DataTable)
-
+        event.stop()
         if key == "enter":
-            if self.zone == "picker" and self.picker_idx == len(self.dirs):
-                self._open_dir_input()  # the "open another directory…" row
-            elif self.zone in ("launch", "picker"):
-                self._launch(LAUNCH_TOOLS[self.launch_idx])
-            elif self.zone == "active":
-                self._enter_active()
-            else:
-                self.action_resume()
-        elif key in ("left", "right") and self.zone in ("launch", "picker"):
-            step = -1 if key == "left" else 1
-            self.launch_idx = (self.launch_idx + step) % len(LAUNCH_TOOLS)
-            self._render_launch()
-            self._render_picker()  # footer verb tracks the selected tool
+            self.action_primary()
+        elif key in ("left", "right"):
+            if self.mode == "launcher":
+                step = -1 if key == "left" else 1
+                self.launch_idx = (self.launch_idx + step) % len(LAUNCH_TOOLS)
+                self._render_detail()
+                self._render_footer()
         elif key == "up":
-            if self.zone == "launch":
-                pass  # top of the chain
-            elif self.zone == "picker":
-                if self.picker_idx <= 0:
-                    self._set_zone("launch")
-                else:
-                    self.picker_idx -= 1
-                    self._render_picker()
-            elif self.zone == "active":
-                if self.active_idx <= 0:
-                    self.picker_idx = len(self.dirs)  # land on the "other directory" row
-                    self._set_zone("picker")
-                else:
-                    self.active_idx -= 1
-                    self._render_active()
-            elif self.zone == "history":
-                row = table.cursor_row or 0
-                if row <= 0:
-                    if self.running:
-                        self.active_idx = len(self.running) - 1
-                        self._set_zone("active")
-                    else:
-                        self.picker_idx = len(self.dirs)  # land on the "other directory" row
-                        self._set_zone("picker")
-                else:
-                    table.move_cursor(row=row - 1)
+            if self.mode == "launcher":
+                self.picker_idx = max(0, self.picker_idx - 1)
+                self._render_detail()
+                self._render_footer()
+            else:
+                self._move(-1)
         elif key == "down":
-            if self.zone == "launch":
-                self.picker_idx = 0
-                self._set_zone("picker")
-            elif self.zone == "picker":
-                if self.picker_idx < len(self.dirs):  # step through dirs + the "other" row
-                    self.picker_idx += 1
-                    self._render_picker()
-                elif self.running:
-                    self.active_idx = 0
-                    self._set_zone("active")
-                else:
-                    self._enter_history_top(table)
-            elif self.zone == "active":
-                if self.active_idx >= len(self.running) - 1:
-                    self._enter_history_top(table)
-                else:
-                    self.active_idx += 1
-                    self._render_active()
-            elif self.zone == "history":
-                row = table.cursor_row or 0
-                table.move_cursor(row=min(row + 1, len(self.filtered) - 1))
+            if self.mode == "launcher":
+                self.picker_idx = min(len(self.dirs), self.picker_idx + 1)
+                self._render_detail()
+                self._render_footer()
+            else:
+                self._move(1)
+
+    def action_primary(self) -> None:
+        """Enter. Whatever the detail pane just promised, this is where it is
+        kept — one entry point so the sentence and the behaviour cannot drift."""
+        if self.mode == "launcher":
+            if self.picker_idx >= len(self.dirs):
+                self._open_dir_input()  # the "type a path" row
+            else:
+                self._launch(LAUNCH_TOOLS[self.launch_idx])
+            return
+        entry = self.current
+        if entry is None:
+            return
+        if entry.kind == "agent":
+            self._focus_agent(entry.agent)
+        else:
+            self.selected = entry.session
+            self.action_resume()
 
     # ------------------------------------------------------------- active now
 
@@ -749,46 +887,8 @@ class AdashApp(App):
 
     def _on_running(self, agents: list[RunningAgent]) -> None:
         self.running = agents
-        self.active_idx = min(self.active_idx, max(0, len(agents) - 1))
-        self._resolve_agent_titles()  # cached: _render_active also runs on the spinner tick
-        self._render_active()
-
-    def _render_active(self) -> None:
-        try:
-            panel = self.query_one("#active", Static)
-        except NoMatches:
-            return  # a poll fired mid-teardown; the panel is already gone
-        panel.border_title = f"active now · {len(self.running)}"
-        if not self.running:
-            panel.update("[dim]no agent sessions running right now[/]")
-            return
-        working = sum(1 for a in self.running if a.state == "working")
-        if working:
-            panel.border_title = f"active now · {len(self.running)} · {working} working"
-        frame = _SPINNER[self._spin % len(_SPINNER)]
-        lines = []
-        for i, agent in enumerate(self.running[:MAX_ACTIVE_ROWS]):
-            title = self._title_for(agent)
-            color = TOOL_COLORS[agent.tool]
-            marker = _status_marker(agent.state, frame, color)
-            head = f"{marker} [{color}]{agent.tool}[/{color}]"
-            pad = " " * (10 - len(agent.tool))
-            cwd_display = (agent.cwd or "?").replace(str(Path.home()), "~")
-            row = (
-                f"{head}{pad}{escape(_truncate(title, 42))}   "
-                f"[dim]{escape(_truncate(cwd_display, 32))} · {agent.tty} · up {agent.elapsed}[/]"
-            )
-            if self.zone == "active" and i == self.active_idx:
-                lines.append(f"[reverse bold] {row} [/]")
-            else:
-                lines.append(f"  {row}")
-            detail = _activity_detail(agent)
-            if detail:
-                lines.append(f"             {detail}")
-        if len(self.running) > MAX_ACTIVE_ROWS:
-            lines.append(f"[dim]…and {len(self.running) - MAX_ACTIVE_ROWS} more[/]")
-        lines.append("[dim]enter or click jumps to the tab[/]")
-        panel.update("\n".join(lines))
+        self._resolve_agent_titles()  # cached: the spinner tick re-renders too
+        self._rebuild()
 
     def _title_for(self, agent: RunningAgent) -> str:
         return self.agent_titles.get(agent.pid) or Path(agent.cwd).name or "session"
@@ -828,11 +928,6 @@ class AdashApp(App):
                 claimed.add(session.id)
         self.agent_titles = titles
 
-    def _enter_active(self) -> None:
-        if not self.running:
-            return
-        self._focus_agent(self.running[self.active_idx])
-
     @work(thread=True, exclusive=True, group="focus")
     def _focus_agent(self, agent: RunningAgent) -> None:
         """Jump to the Warp tab running this agent (applescript is slow: thread)."""
@@ -854,25 +949,6 @@ class AdashApp(App):
         else:
             self.notify(f"Warp is up front; look for the tab on {agent.tty}", timeout=3)
 
-    def _agent_at_line(self, line: int) -> int | None:
-        """Map a content row in the #active panel to a running-agent index.
-
-        Each agent takes one row, plus a second when it has a detail line
-        (current action / live tokens); clicking either selects that agent.
-        """
-        if line < 0:
-            return None
-        cursor = 0
-        for i, agent in enumerate(self.running[:MAX_ACTIVE_ROWS]):
-            cursor += 1
-            if line < cursor:
-                return i
-            if _activity_detail(agent):
-                cursor += 1
-                if line < cursor:
-                    return i
-        return None
-
     # ------------------------------------------------------------- usage
 
     @work(thread=True)
@@ -890,10 +966,8 @@ class AdashApp(App):
             )
         # the gauges only mean anything once they have data, so the self-test
         # sweep waits for the first load rather than firing on an empty panel
-        if not self._boot_started and usages:
-            self._boot_started = True
-            self._start_boot_sweep()
-        self._render_usage()
+        self._boot = 1.0  # the sweep belongs to the usage overlay, not the shell
+        self._render_all()
 
     def _usage_prefix(self, usage: ToolUsage) -> str:
         """Marker + tool + plan columns, padded to a fixed visible width."""
@@ -960,8 +1034,9 @@ class AdashApp(App):
         return "\n".join(lines)
 
     def _render_usage(self) -> None:
-        panel = self.query_one("#usage", Static)
-        panel.update(self._usage_text(panel.size.width or None))
+        """Usage no longer has a permanent panel: the detail pane carries the one
+        window that matters to the selection, and `u` opens the full grid."""
+        self._render_detail()
 
     # ------------------------------------------------------------- history
 
@@ -976,9 +1051,9 @@ class AdashApp(App):
         eligible = apply_titles(sessions, self._title_store)
         self.sessions = sessions
         self.dirs = self._recent_dirs()
-        self.picker_idx = min(self.picker_idx, len(self.dirs))  # len(dirs) == the "other" row
-        self._render_picker()
-        self._populate()
+        self.picker_idx = min(self.picker_idx, len(self.dirs))  # len(dirs) == the "type a path" row
+        self._loaded = True
+        self._rebuild()
         self.load_running()
         self._schedule_titles(eligible)
 
@@ -1034,58 +1109,7 @@ class AdashApp(App):
                 return False
         return True
 
-    def _populate(self) -> None:
-        try:
-            table = self.query_one("#sessions", DataTable)
-        except NoMatches:
-            return  # a refresh landed mid-teardown; nothing to draw
-        # the background refresh rebuilds this table on a timer, so remember which
-        # session the cursor was on and put it back by id — otherwise a new row
-        # arriving at the top would silently drag your selection to a different one.
-        prev_id = None
-        if self.zone == "history" and self.filtered and table.cursor_row is not None:
-            if 0 <= table.cursor_row < len(self.filtered):
-                prev_id = self.filtered[table.cursor_row].id
-        table.clear()
-        self.filtered = [s for s in self.sessions if self._matches(s)]
-        # budget the column widths from the actual terminal width:
-        # tool 10, project 12, active 9, msgs 6, tokens 8, cell padding 12
-        width = table.size.width or 80
-        title_w = max(20, width - 57)
-        for i, session in enumerate(self.filtered):
-            chip = Text("● ", style=TOOL_COLORS[session.tool]) + Text(session.tool, style=TOOL_COLORS[session.tool])
-            table.add_row(
-                chip,
-                _truncate(session.title, title_w),
-                _truncate(session.project_name, 12),
-                rel_time(session.last_active),
-                str(session.n_messages) if session.n_messages else "—",
-                fmt_tokens(session.tokens),
-                key=str(i),
-            )
-        state = "cleared" if self.cleared_at else self.tool_filter
-        table.border_title = f"history ({state}) · {len(self.filtered)}"
-        # while cleared, the subtitle has to advertise the way back — the notify
-        # toast is gone in three seconds, so this is the only standing reminder.
-        table.border_subtitle = (
-            "press u to restore history · / searches"
-            if self.cleared_at
-            else "enter resumes · / searches · C clears"
-        )
-        if self.filtered and self.zone == "history":
-            row = table.cursor_row or 0
-            if prev_id is not None:
-                for i, session in enumerate(self.filtered):
-                    if session.id == prev_id:
-                        row = i
-                        break
-            table.move_cursor(row=min(row, len(self.filtered) - 1))
-
     # ------------------------------------------------------------- events
-
-    @on(DataTable.RowSelected)
-    def _on_selected(self, event: DataTable.RowSelected) -> None:
-        self.action_resume()
 
     @on(Input.Changed, "#search")
     def _on_search_changed(self, event: Input.Changed) -> None:
@@ -1099,12 +1123,12 @@ class AdashApp(App):
     # ------------------------------------------------------------- actions
 
     def action_resume(self) -> None:
-        table = self.query_one("#sessions", DataTable)
-        if not self.filtered or table.cursor_row is None:
-            return
-        row = min(table.cursor_row, len(self.filtered) - 1)
-        self.selected = self.filtered[row]
         session = self.selected
+        if session is None:
+            entry = self.current
+            if entry is None or entry.kind != "session":
+                return
+            session = self.selected = entry.session
         # Resume in a fresh Warp tab, the same way the launcher opens new
         # sessions, so the dashboard stays up and you never lose it to the
         # resumed session taking over this terminal.
@@ -1168,7 +1192,7 @@ class AdashApp(App):
         if len(opened) == len(dirs):
             where = ", ".join(Path(d).name or d for d in dirs)
             self.notify(f"opening {tool}{plan} in {where}", timeout=2)
-        self._render_picker()  # footer echoes what has been opened
+        self._render_detail()  # the pane echoes what has been opened
 
     def _open_tab(self, tool: str, cwd: str, suffix: str = "", env: dict | None = None, command: str | None = None) -> bool:
         try:
@@ -1206,6 +1230,51 @@ class AdashApp(App):
                 usage.active = usage.label == self.active_claude
         self._render_usage()
         self.notify(f"claude plan: {self.active_claude}", timeout=2)
+
+    def action_new_session(self) -> None:
+        """n. The launcher takes over the detail pane rather than opening a
+        modal, so the list stays visible and you keep your bearings."""
+        self.mode = "launcher"
+        self._render_all()
+
+    def action_keymap(self) -> None:
+        theme = self.theme_obj
+        blocks = []
+        for heading, rows in self.KEYMAP_HELP:
+            blocks.append(bridge.label(heading, theme))
+            for key, what in rows:
+                blocks.append(
+                    f"  [{theme.text}][bold]{key.ljust(10)}[/bold][/] [{theme.text_soft}]{what}[/]"
+                )
+            blocks.append("")
+        self.push_screen(_OverlayScreen("\n".join(blocks).rstrip(), "Keys"))
+
+    def action_usage(self) -> None:
+        """u. The full subscription grid on demand. It used to sit on screen
+        permanently, which meant four numbers competing with the thing you came
+        here to look at."""
+        body = self._usage_text(72) if self.usages else "[dim]usage has not loaded yet[/]"
+        self.push_screen(_OverlayScreen(body, "Subscriptions"))
+
+    def action_toggle_theme(self) -> None:
+        self.theme_name = "light" if self.theme_name == "dark" else "dark"
+        _save_theme_pref(self.theme_name)
+        self.refresh_css()
+        self._render_all()
+        self.notify(f"{self.theme_name} mode", timeout=2)
+
+    def action_copy_resume(self) -> None:
+        """y. Copies the exact command the detail pane is showing, so the pane
+        is not just describing something you then have to retype."""
+        entry = self.current
+        if entry is None or entry.kind != "session":
+            return
+        command = resume_invocation(entry.session)
+        try:
+            self.copy_to_clipboard(command)
+        except Exception:
+            pass
+        self.notify(f"copied: {command}", timeout=3)
 
     def action_clear(self) -> None:
         self.cleared_at = datetime.now(timezone.utc)
@@ -1266,6 +1335,9 @@ class AdashApp(App):
             self._close_search()
         elif self.query_one("#dirinput", Input).display:
             self._close_dir_input()
+        elif self.mode == "launcher":
+            self.mode = "browse"
+            self._render_all()
 
     def _set_filter(self, tool: str) -> None:
         self.tool_filter = tool
@@ -1291,8 +1363,5 @@ class AdashApp(App):
         self.load_usage(force=True)
 
     def on_resize(self) -> None:
-        self._render_banner()
-        if self.usages:
-            self._render_usage()  # the stale marker is budgeted from the width
-        if self.sessions:
-            self._populate()
+        self._apply_width()
+        self._render_all()

@@ -112,7 +112,7 @@ def css_variables(theme: Theme) -> dict[str, str]:
 # ------------------------------------------------------------------- utilities
 
 LIST_TITLE_W = 38  # the mock truncates list titles here; see the SPEC artboard
-SELECTION_BAR = "▏"  # the 2px cobalt rule down the left edge of a selected row
+SELECTION_BAR = "│"  # the 2px cobalt rule down the left edge of a selected row
 
 
 def truncate(text: str, width: int) -> str:
@@ -139,9 +139,11 @@ def rule_line(theme: Theme, width: int) -> str:
 #: How each live agent state reads. `unknown` is deliberately styled like idle
 #: rather than like an error: not having resolved an agent's state yet is the
 #: normal case for the first couple of seconds and shouldn't flash at you.
+#: Two distinct shapes rather than two colours of the same dot, so the states
+#: stay legible without relying on colour vision.
 _STATE_GLYPH = {
     "working": "●",
-    "waiting": "◐",
+    "waiting": "◆",
     "idle": "○",
     "unknown": "○",
 }
@@ -364,6 +366,23 @@ def detail_empty(theme: Theme) -> str:
 
 # -------------------------------------------------------------------- launcher
 
+def launch_sentence(
+    tools: tuple[str, ...],
+    tool_idx: int,
+    dirs: list[tuple[str, int, datetime | None]],
+    dir_idx: int,
+) -> str:
+    """"open codex in ~/Repos/ai-next" — the promise the action bar makes.
+
+    Shared by the launcher body and the pinned action bar so the two can never
+    drift into describing different outcomes.
+    """
+    tool = tools[tool_idx]
+    verb = "open" if tool != "terminal" else "open a shell in"
+    target = _tilde(dirs[dir_idx][0]) if dir_idx < len(dirs) else "a path you type"
+    return f"{verb} {tool} in {target}"
+
+
 def launcher(
     theme: Theme,
     tools: tuple[str, ...],
@@ -373,6 +392,7 @@ def launcher(
     opened: list[str],
     plan_label: str = "",
     plan_hint: str = "",
+    include_action: bool = True,
 ) -> str:
     """S3 · the new-session pane.
 
@@ -406,11 +426,9 @@ def launcher(
                               opened=path in opened, current=(i == 0)))
     lines.append(_typed_path_row(theme, selected=(dir_idx == len(dirs))))
 
-    tool = tools[tool_idx]
-    verb = "open" if tool != "terminal" else "open a shell in"
-    target = _tilde(dirs[dir_idx][0]) if dir_idx < len(dirs) else "a path you type"
-    lines += ["", action_bar(theme, "↵", f"{verb} {tool} in {target}",
-                             "stays open for the next one")]
+    if include_action:
+        lines += ["", action_bar(theme, "⏎", launch_sentence(tools, tool_idx, dirs, dir_idx),
+                                 "stays open for the next one")]
     if opened:
         names = ", ".join(_short_project(p) for p in opened)
         lines.append(f"[{theme.text_soft}]opened this run:[/] [{theme.text}]{escape(names)}[/]")

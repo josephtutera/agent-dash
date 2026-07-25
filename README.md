@@ -1,28 +1,32 @@
 # agent-dash
 
 One terminal dashboard for your Claude Code, Codex, OpenCode, and Gemini
-sessions: subscription usage, agents running right now, and your full
-searchable history, all in one place.
+sessions: agents running right now, your full searchable history, and a
+launcher, in one list with one cursor.
 
 <img width="3740" height="2438" alt="CleanShot 2026-07-20 at 13 27 43@2x" src="https://github.com/user-attachments/assets/a4735c00-ee6d-4f63-bcd7-ff029cd9235e" />
 
 ## Features
 
-- **Subscriptions at a glance.** Claude usage windows (5-hour and 7-day, with
-  multi-account support), Codex rate-limit windows, and OpenCode 7-day API
-  spend, with color-coded bars as you warm up. (Gemini has no local usage
-  signal, so it isn't shown here.)
-- **Active now.** A live view of every agent actually running on your machine:
-  working / waiting / idle state, the file or command it's on, and live token
-  counts. Hit enter or click a row to jump straight to that agent's Warp tab.
-- **Launch new sessions.** Start claude, codex, opencode, gemini, or a plain
-  shell in Warp tabs, in one directory or several at once, straight from the
-  dashboard.
-- **Searchable history.** Every session from all four tools in one table.
-  Filter by tool, search titles and projects, hit enter, and get the exact
-  command to resume that session where you left off.
-- **Wrap-proof banner.** The figlet logo measures itself against the terminal
-  and steps down to a smaller font or plain text, so it never shreds.
+- **One list, one cursor.** Agents running right now sit at the top, your
+  history sits under them, and the arrow keys walk straight through both. A
+  session that is currently running appears once, as the live row.
+- **The right pane says what Enter will do.** Whatever is selected, the detail
+  pane ends with the sentence Enter is about to carry out: jump to that agent's
+  Warp tab, or resume that session in a new one. It also shows the live tool
+  steps for a running agent, and the literal `claude --resume …` command for a
+  finished one (`y` copies it).
+- **Colour means state, not tool.** Green is running fine, amber is waiting on
+  you, and nothing else is coloured, so the agent that needs you is the only
+  thing on screen that pulls. The tool is a word in the meta line.
+- **Launch new sessions.** Press `n` and the detail pane becomes a launcher:
+  pick claude, codex, opencode, gemini or a plain shell, pick a directory from
+  your recent projects (or type one), and Enter opens a Warp tab. It stays
+  open, so several tabs is several presses.
+- **Light and dark.** `T` switches and remembers. `--theme light` picks one at
+  launch.
+- **Four keys on screen.** Everything else is behind `?`. Under 100 columns the
+  detail pane steps aside and the list takes the full width.
 
 ## Requirements
 
@@ -55,6 +59,7 @@ pip install -e '.[dev]'
 
 ```sh
 adash                # launch the dashboard
+adash --theme light  # start in light mode (T toggles and remembers)
 adash --dump         # print sessions as text, no TUI
 adash --usage        # print subscription usage as text, no TUI
 adash --limit 500    # max sessions to scan per tool (default 300)
@@ -77,20 +82,26 @@ adash() {
 
 | Key | Action |
 | --- | --- |
-| `1`–`5` | filter history: all / claude / codex / opencode / gemini |
+| `↑` `↓` | move through the list |
+| `↵` | do what the detail pane says |
+| `n` | new session |
 | `/` | search titles, prompts, projects (`esc` to close) |
-| `c` `x` `o` `g` | new claude / codex / opencode / gemini session |
-| `t` | new plain terminal |
-| `tab` | switch the active Claude plan (multi-account) |
-| `C` / `u` | clear history / undo |
-| `r` | refresh |
-| `q` | quit |
+| `?` | every key, in one panel |
+| `1`–`5` | filter: all / claude / codex / opencode / gemini |
+| `c` `x` `o` `g` `t` | launcher, pre-picked to that tool (`t` is a plain shell) |
+| `tab` | switch the active Claude plan (multi-account, in the launcher) |
+| `y` | copy the selected session's resume command |
+| `u` | subscription usage |
+| `T` | light / dark |
+| `C` / `U` | clear history / undo |
+| `r` / `q` | refresh / quit |
 
-In the launcher: arrow keys select, `space` toggles directories, `enter` opens
-the tabs. In the active-now list, `enter` (or a click) jumps to that agent's
-Warp tab. The first time you jump, macOS will ask you to grant Warp
-Accessibility access so the dashboard can switch tabs for you; without it,
-Warp still comes to the front but you'll pick the tab yourself.
+In the launcher, `←` `→` pick the tool and `↑` `↓` pick the directory; `enter`
+opens a tab and leaves the launcher up. In the list, a click selects a row and
+a second click on the same row commits it. The first time you jump to a tab,
+macOS will ask you to grant Warp Accessibility access so the dashboard can
+switch tabs for you; without it, Warp still comes to the front but you'll pick
+the tab yourself.
 
 ## Where the data comes from
 

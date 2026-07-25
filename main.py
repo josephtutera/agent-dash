@@ -70,6 +70,8 @@ def main() -> None:
                         help="run a subcommand (serve = resident HUD snapshot daemon)")
     parser.add_argument("--cmd-file", help="write the chosen resume command to this file")
     parser.add_argument("--limit", type=int, default=300, help="max sessions to scan per tool")
+    parser.add_argument("--theme", choices=["light", "dark"],
+                        help="start in this theme (default: whatever T last saved)")
     parser.add_argument("--dump", action="store_true", help="print sessions as text and exit (no TUI)")
     parser.add_argument("--usage", action="store_true", help="print subscription usage and exit (no TUI)")
     parser.add_argument("--serve", action="store_true", help="run the resident HUD snapshot daemon")
@@ -113,7 +115,7 @@ def main() -> None:
 
     set_tab_title(TAB_TITLE)
     try:
-        app = AdashApp(cmd_file=args.cmd_file, limit=args.limit)
+        app = AdashApp(cmd_file=args.cmd_file, limit=args.limit, theme_name=args.theme)
         app.run()
     finally:
         set_tab_title("")  # hand the tab back to the shell's process/cwd display

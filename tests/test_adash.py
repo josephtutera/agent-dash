@@ -479,41 +479,6 @@ def test_app_new_gemini_session(tmp_path: Path, monkeypatch: pytest.MonkeyPatch)
     assert f'directory = "{os.getcwd()}"' in config
 
 
-def test_banner_art_picks_a_font_that_fits():
-    import pyfiglet
-
-    trim = app_module._trim_descenders
-    arts = [trim(pyfiglet.figlet_format(app_module.BANNER_TEXT, font=f).rstrip())
-            for f in app_module.BANNER_FONTS]
-    widths = [max(len(line) for line in art.splitlines()) for art in arts]
-
-    assert widths == sorted(widths, reverse=True), "BANNER_FONTS must be widest-first"
-    assert app_module._banner_art(widths[0]) == arts[0]
-    assert app_module._banner_art(widths[0] - 1) == arts[1]
-    assert app_module._banner_art(widths[-1]) == arts[-1]
-    assert app_module._banner_art(widths[-1] - 1) == ""  # nothing fits: plain-text fallback
-
-
-def test_banner_trims_the_orphan_g_descender():
-    import pyfiglet
-
-    # figlet slant hangs the lowercase-g tail on its own sparse line below the
-    # word; the banner must sit on its dense baseline instead of that orphan
-    raw = pyfiglet.figlet_format(app_module.BANNER_TEXT, font="slant").rstrip()
-    raw_lines = raw.split("\n")
-
-    def ink(line: str) -> int:
-        return len(line.replace(" ", ""))
-
-    assert ink(raw_lines[-1]) * 3 < max(ink(l) for l in raw_lines), "fixture: last line is a sparse tail"
-    trimmed = app_module._trim_descenders(raw).split("\n")
-    assert len(trimmed) == len(raw_lines) - 1  # the orphan descender line is gone
-    assert ink(trimmed[-1]) > ink(raw_lines[-1])  # new bottom is the dense baseline
-    # a block with no descender tail is left exactly as-is
-    solid = "\n".join(["#####", "#   #", "#####"])
-    assert app_module._trim_descenders(solid) == solid
-
-
 def test_boot_sweep_pegs_then_settles_to_true():
     sweep = app_module._sweep_pct
     peak = app_module._BOOT_PEAK
@@ -536,32 +501,6 @@ def test_boot_sweep_pegs_then_settles_to_true():
     # never overshoots outside the [true, peg] envelope
     for p in range(0, 101):
         assert 0.0 <= sweep(16.0, p / 100) <= 100.0
-
-
-def test_banner_never_exceeds_its_width(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
-    # a banner wider than the Static gets word-wrapped mid-glyph, shredding the
-    # art into diagonal fragments; at every terminal width it must fit instead
-    monkeypatch.setattr(app_module, "collect_all", lambda limit=300: _fake_sessions())
-    _stub_usage(monkeypatch)
-    _stub_running(monkeypatch)
-
-    async def check(width: int) -> None:
-        app = AdashApp(cmd_file=str(tmp_path / f"cmd-{width}"))
-        async with app.run_test(size=(width, 32)) as pilot:
-            await _wait_for_table(pilot, app)
-            banner = app.query_one("#banner", Static)
-            plain = banner.content.replace("[bold]", "").replace("[/]", "")
-            for line in plain.splitlines():
-                assert len(line) <= banner.content_region.width
-
-    async def run() -> None:
-        for width in (130, 66, 62, 61, 52, 50, 49, 40, 24):
-            await check(width)
-
-    asyncio.run(run())
-
-
-# ---------------------------------------------------------------- agents
 
 
 def test_parse_ps_detects_only_terminal_agents():
@@ -734,10 +673,31 @@ def _stub_running(monkeypatch: pytest.MonkeyPatch, agents: list | None = None) -
 
 
 async def _wait_for_table(pilot, app) -> None:
+    """Wait for the first history load. The old screen had a DataTable to poll;
+    the Bridge layout has one list, so the signal is the entry list filling up."""
     for _ in range(100):
         await pilot.pause(0.05)
-        if app.query_one("#sessions", DataTable).row_count:
+        if app.entries:
             break
+
+
+def _panel_text(app, selector: str) -> str:
+    """Plain text of a rendered panel, with the markup tags stripped."""
+    from rich.text import Text
+
+    content = app.query_one(selector).content
+    plain = getattr(content, "plain", None)
+    return plain if isinstance(plain, str) else Text.from_markup(str(content)).plain
+
+
+def _session_rows(app) -> list:
+    """The past-session entries of the single list, in display order."""
+    return [e.session for e in app.entries if e.kind == "session"]
+
+
+def _cursor_session(app):
+    entry = app.current
+    return entry.session if entry and entry.kind == "session" else None
 
 
 def test_app_filter_and_resume(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
@@ -756,31 +716,23 @@ def test_app_filter_and_resume(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
 
     async def run() -> None:
         app = AdashApp(cmd_file=str(cmd_file))
-        async with app.run_test(size=(110, 32)) as pilot:
-            table = app.query_one("#sessions", DataTable)
+        async with app.run_test(size=(120, 32)) as pilot:
             await _wait_for_table(pilot, app)
-            assert table.row_count == 2
+            assert len(_session_rows(app)) == 2
 
             await pilot.press("3")  # filter to codex only
             await pilot.pause(0.1)
-            assert table.row_count == 1
+            assert len(_session_rows(app)) == 1
 
             await pilot.press("1")  # back to all
             await pilot.pause(0.1)
-            assert table.row_count == 2
+            assert len(_session_rows(app)) == 2
 
-            # chain is launch -> picker(dirs + "other" row) -> history (no running agents)
-            assert len(app.dirs) == 2  # cwd + /tmp from the fake sessions
-            await pilot.press("down")  # launch -> picker[0]
-            await pilot.pause(0.05)
-            assert app.zone == "picker"
-            await pilot.press("down")  # picker[0] -> picker[1]
-            await pilot.press("down")  # picker[1] -> "open another directory" row
-            await pilot.press("down")  # "other" row (last) -> history
-            await pilot.pause(0.1)
-            assert app.zone == "history"
-
-            await pilot.press("enter")  # resume first row (claude abc)
+            # one list, one cursor: with nothing running it opens on the newest
+            # session, so Enter resumes without any navigation at all
+            assert app.mode == "browse"
+            assert _cursor_session(app).id == "abc"
+            await pilot.press("enter")
             await pilot.pause(0.1)
 
     asyncio.run(run())
@@ -792,91 +744,91 @@ def test_app_filter_and_resume(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     assert 'directory = "/tmp"' in config
     assert not cmd_file.exists()  # nothing written back to the shell
 
-
 def test_selection_starts_on_claude_and_navigates(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """The tool chips moved into the launcher, so left/right only steer once you
+    have asked for a new session. In the list they do nothing, which is what
+    stops the old four-zone chain from creeping back."""
     monkeypatch.setattr(app_module, "collect_all", lambda limit=300: _fake_sessions())
     _stub_usage(monkeypatch)
     _stub_running(monkeypatch)
 
     async def run() -> None:
         app = AdashApp(cmd_file=str(tmp_path / "cmd"))
-        async with app.run_test(size=(110, 32)) as pilot:
+        async with app.run_test(size=(120, 32)) as pilot:
             await _wait_for_table(pilot, app)
-            assert app.zone == "launch"
+            assert app.mode == "browse"
+
+            await pilot.press("right")  # no-op while browsing
+            await pilot.pause(0.05)
+            assert app.mode == "browse" and app.launch_idx == 0
+
+            await pilot.press("n")
+            await pilot.pause(0.05)
+            assert app.mode == "launcher"
             assert app.launch_idx == 0  # starts on claude
 
             await pilot.press("right")
-            await pilot.pause(0.1)
+            await pilot.pause(0.05)
             assert app.launch_idx == 1  # codex
 
             await pilot.press("right")
-            await pilot.pause(0.1)
+            await pilot.pause(0.05)
             assert app.launch_idx == 2  # opencode
 
             await pilot.press("left")
-            await pilot.pause(0.1)
+            await pilot.pause(0.05)
             assert app.launch_idx == 1
 
-            await pilot.press("down")  # launch -> picker (directory list)
-            await pilot.pause(0.1)
-            assert app.zone == "picker"
-
-            await pilot.press("up")  # picker[0] -> back to launcher chips
-            await pilot.pause(0.1)
-            assert app.zone == "launch"
+            await pilot.press("escape")  # back to the list
+            await pilot.pause(0.05)
+            assert app.mode == "browse"
 
     asyncio.run(run())
 
-
 def test_navigation_through_active_rows(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """One cursor walks straight from the running agents into history. The old
+    screen made you cross four zones to get here."""
     from agents import RunningAgent
 
     monkeypatch.setattr(app_module, "collect_all", lambda limit=300: _fake_sessions())
     _stub_usage(monkeypatch)
     _stub_running(monkeypatch, agents=[
-        RunningAgent(tool="claude", pid=1, tty="ttys001", elapsed="5m", cwd="/tmp"),
-        RunningAgent(tool="codex", pid=2, tty="ttys002", elapsed="9m", cwd="/tmp"),
+        RunningAgent(tool="claude", pid=1, tty="ttys001", elapsed="5m", cwd="/nowhere-1"),
+        RunningAgent(tool="codex", pid=2, tty="ttys002", elapsed="9m", cwd="/nowhere-2"),
     ])
 
     async def run() -> None:
         app = AdashApp(cmd_file=str(tmp_path / "cmd"))
-        async with app.run_test(size=(110, 32)) as pilot:
+        async with app.run_test(size=(120, 32)) as pilot:
             await _wait_for_table(pilot, app)
             for _ in range(100):
                 await pilot.pause(0.05)
                 if len(app.running) == 2:
                     break
 
-            # chain: launch -> picker(2 dirs + "other" row) -> active(2) -> history
-            assert len(app.dirs) == 2
-            await pilot.press("down")  # launch -> picker[0]
-            await pilot.press("down")  # picker[0] -> picker[1]
-            await pilot.press("down")  # picker[1] -> "open another directory" row
+            kinds = [e.kind for e in app.entries]
+            assert kinds[:2] == ["agent", "agent"]  # live work sorts to the top
+            assert "session" in kinds
+
+            assert app.cursor == 0
+            await pilot.press("down")
             await pilot.pause(0.05)
-            assert app.zone == "picker"
-            await pilot.press("down")  # "other" row (last) -> active[0]
-            await pilot.pause(0.1)
-            assert app.zone == "active" and app.active_idx == 0
+            assert app.cursor == 1 and app.current.kind == "agent"
 
-            await pilot.press("down")  # -> active[1]
-            await pilot.pause(0.1)
-            assert app.active_idx == 1
+            await pilot.press("down")
+            await pilot.pause(0.05)
+            assert app.cursor == 2 and app.current.kind == "session"
 
-            await pilot.press("down")  # last active -> history
-            await pilot.pause(0.1)
-            assert app.zone == "history"
+            await pilot.press("up")
+            await pilot.pause(0.05)
+            assert app.cursor == 1 and app.current.kind == "agent"
 
-            await pilot.press("up")  # history row 0 -> active[last]
-            await pilot.pause(0.1)
-            assert app.zone == "active" and app.active_idx == 1
-
-            await pilot.press("up")  # active[1] -> active[0]
-            await pilot.press("up")  # active[0] -> picker[last]
-            await pilot.pause(0.1)
-            assert app.zone == "picker"
+            for _ in range(5):  # the cursor stops at the top, it does not wrap
+                await pilot.press("up")
+            await pilot.pause(0.05)
+            assert app.cursor == 0
 
     asyncio.run(run())
-
 
 def test_focus_warp_tab_cycles_until_title_matches(monkeypatch: pytest.MonkeyPatch):
     titles = ["~ agent-dash", "✳ Some other tab", "✳ Design bug fix and GitHub push"]
@@ -940,26 +892,28 @@ def test_enter_on_active_row_jumps_to_tab(tmp_path: Path, monkeypatch: pytest.Mo
 
     async def run() -> None:
         app = AdashApp(cmd_file=str(tmp_path / "cmd"))
-        async with app.run_test(size=(110, 32)) as pilot:
+        async with app.run_test(size=(120, 32)) as pilot:
             await _wait_for_table(pilot, app)
             for _ in range(100):
                 await pilot.pause(0.05)
                 if app.running:
                     break
-            for _ in range(10):  # walk the chain down into the active zone
-                await pilot.press("down")
-                await pilot.pause(0.05)
-                if app.zone == "active":
-                    break
-            assert app.zone == "active"
+            # the running agent is the first row, so Enter needs no navigation
+            assert app.current.kind == "agent"
             await pilot.press("enter")
             await _wait_for_focus_call(pilot, calls)
 
     asyncio.run(run())
     assert calls and "web-app" in calls[0]
 
+def test_click_active_row_selects_then_jumps(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """A click selects; a second click on the same row commits it.
 
-def test_click_active_row_jumps_to_tab(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    The old panel jumped on the first click. Now that one list holds live agents
+    and resumable history together, a stray click would have spawned a Warp tab,
+    so the first click only moves the cursor and lets the detail pane tell you
+    what the next one will do.
+    """
     from agents import RunningAgent
 
     monkeypatch.setattr(app_module, "collect_all", lambda limit=300: _fake_sessions())
@@ -976,27 +930,24 @@ def test_click_active_row_jumps_to_tab(tmp_path: Path, monkeypatch: pytest.Monke
 
     async def run() -> None:
         app = AdashApp(cmd_file=str(tmp_path / "cmd"))
-        async with app.run_test(size=(110, 32)) as pilot:
+        async with app.run_test(size=(120, 32)) as pilot:
             await _wait_for_table(pilot, app)
             for _ in range(100):
                 await pilot.pause(0.05)
-                if app.running:
+                if len(app.running) == 2:
                     break
-            # panel rows: border 1 + padding-top 1, so content line 0 is y=2;
-            # the first agent also has a detail line at y=3
-            await pilot.click("#active", offset=(5, 2))
-            await _wait_for_focus_call(pilot, calls)
-            assert calls and "web-app" in calls[0]
-            assert app.zone == "active" and app.active_idx == 0
+            second = next(y for y, i in sorted(app._line_index.items()) if i == 1)
 
-            calls.clear()
-            await pilot.click("#active", offset=(5, 4))  # second agent's row
+            await pilot.click("#listbody", offset=(5, second))
+            await pilot.pause(0.1)
+            assert app.cursor == 1  # selected, and nothing was launched
+            assert not calls
+
+            await pilot.click("#listbody", offset=(5, second))
             await _wait_for_focus_call(pilot, calls)
             assert calls and "api-server" in calls[0]
-            assert app.active_idx == 1
 
     asyncio.run(run())
-
 
 def test_clear_and_undo_history(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     from datetime import timedelta
@@ -1011,26 +962,22 @@ def test_clear_and_undo_history(tmp_path: Path, monkeypatch: pytest.MonkeyPatch)
 
     async def run() -> None:
         app = AdashApp(cmd_file=str(tmp_path / "cmd"))
-        async with app.run_test(size=(110, 32)) as pilot:
-            table = app.query_one("#sessions", DataTable)
+        async with app.run_test(size=(120, 32)) as pilot:
             await _wait_for_table(pilot, app)
-            assert table.row_count == 3
-            assert "C clears" in (table.border_subtitle or "")
+            assert len(_session_rows(app)) == 3
 
             await pilot.press("C")  # clear: hide everything seen so far
             await pilot.pause(0.1)
-            assert table.row_count == 0
-            # the toast fades, so the border must keep advertising the way back
-            assert "u to restore" in (table.border_subtitle or "")
-            assert "(cleared)" in (table.border_title or "")
+            assert len(_session_rows(app)) == 0
+            # the toast fades, so the header must keep advertising the way back
+            assert "U restores" in _panel_text(app, "#header")
 
-            await pilot.press("u")  # undo
+            await pilot.press("U")  # undo
             await pilot.pause(0.1)
-            assert table.row_count == 3
-            assert "C clears" in (table.border_subtitle or "")
+            assert len(_session_rows(app)) == 3
+            assert "U restores" not in _panel_text(app, "#header")
 
     asyncio.run(run())
-
 
 def test_clear_history_does_not_persist_across_launches(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     # An accidental C used to write a marker to disk and reload it on every
@@ -1053,27 +1000,7 @@ def test_clear_history_does_not_persist_across_launches(tmp_path: Path, monkeypa
         assert second.cleared_at is None
         async with second.run_test(size=(110, 32)) as pilot:
             await _wait_for_table(pilot, second)
-            assert second.query_one("#sessions", DataTable).row_count == 2
-
-    asyncio.run(run())
-
-
-def test_active_panel_sits_below_the_new_session_selector(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
-    # active-now renders under the launcher/picker so the visual order matches
-    # the keyboard chain (launch -> picker -> active -> history).
-    monkeypatch.setattr(app_module, "collect_all", lambda limit=300: _fake_sessions())
-    _stub_usage(monkeypatch)
-    _stub_running(monkeypatch)
-
-    async def run() -> None:
-        app = AdashApp(cmd_file=str(tmp_path / "cmd"))
-        async with app.run_test(size=(110, 32)) as pilot:
-            await _wait_for_table(pilot, app)
-            launch_y = app.query_one("#launch").region.y
-            picker_y = app.query_one("#picker").region.y
-            active_y = app.query_one("#active").region.y
-            sessions_y = app.query_one("#sessions").region.y
-            assert launch_y < picker_y < active_y < sessions_y
+            assert len(_session_rows(second)) == 2
 
     asyncio.run(run())
 
@@ -1090,9 +1017,8 @@ def test_history_auto_refresh_shows_new_sessions(tmp_path: Path, monkeypatch: py
     async def run() -> None:
         app = AdashApp(cmd_file=str(tmp_path / "cmd"))
         async with app.run_test(size=(110, 32)) as pilot:
-            table = app.query_one("#sessions", DataTable)
             await _wait_for_table(pilot, app)
-            assert table.row_count == 2
+            assert len(_session_rows(app)) == 2
 
             newer = Session(tool="claude", id="new", title="Brand new", project_dir="/tmp",
                             last_active=datetime.now(timezone.utc), tokens=1, n_messages=1,
@@ -1100,32 +1026,30 @@ def test_history_auto_refresh_shows_new_sessions(tmp_path: Path, monkeypatch: py
             state["sessions"] = [newer] + _fake_sessions()
             for _ in range(60):
                 await pilot.pause(0.05)
-                if table.row_count == 3:
+                if len(_session_rows(app)) == 3:
                     break
-            assert table.row_count == 3
+            assert len(_session_rows(app)) == 3
 
     asyncio.run(run())
 
 
 def test_history_refresh_preserves_selected_session(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
-    # a background refresh rebuilds the table; if a new row lands on top it must
-    # not drag the cursor onto a different session than the one you had selected.
+    # The active poll rebuilds the single list every couple of seconds. If a new
+    # session lands on top it must not drag the cursor onto a different row —
+    # the cursor is keyed by identity, not by index, precisely for this.
     monkeypatch.setattr(app_module, "HISTORY_POLL_SECONDS", 0.2)
     state = {"sessions": _fake_sessions()}  # [abc (claude), xyz (codex)]
     monkeypatch.setattr(app_module, "collect_all", lambda limit=300: list(state["sessions"]))
     _stub_usage(monkeypatch)
-    _stub_running(monkeypatch)  # no running agents: chain is launch -> picker -> history
+    _stub_running(monkeypatch)
 
     async def run() -> None:
         app = AdashApp(cmd_file=str(tmp_path / "cmd"))
-        async with app.run_test(size=(110, 32)) as pilot:
-            table = app.query_one("#sessions", DataTable)
+        async with app.run_test(size=(120, 32)) as pilot:
             await _wait_for_table(pilot, app)
-            for _ in range(4):  # launch -> picker[0] -> picker[1] -> "other" -> history
-                await pilot.press("down")
-                await pilot.pause(0.05)
-            assert app.zone == "history"
-            assert app.filtered[table.cursor_row].id == "abc"
+            await pilot.press("down")  # take hold of the cursor: now it is yours
+            await pilot.pause(0.05)
+            assert _cursor_session(app).id == "xyz"
 
             newer = Session(tool="claude", id="new", title="Brand new", project_dir="/tmp",
                             last_active=datetime.now(timezone.utc), tokens=1, n_messages=1,
@@ -1133,16 +1057,12 @@ def test_history_refresh_preserves_selected_session(tmp_path: Path, monkeypatch:
             state["sessions"] = [newer] + _fake_sessions()
             for _ in range(60):
                 await pilot.pause(0.05)
-                if table.row_count == 3:
+                if len(_session_rows(app)) == 3:
                     break
-            assert table.row_count == 3
-            assert app.filtered[table.cursor_row].id == "abc"  # still on the same session
+            assert len(_session_rows(app)) == 3
+            assert _cursor_session(app).id == "xyz"  # still on the same session
 
     asyncio.run(run())
-
-
-# ---------------------------------------------------------------- titles
-
 
 def test_clean_title():
     from models import clean_title
@@ -1226,10 +1146,12 @@ def test_non_codex_tabs_are_left_alone(tmp_path: Path):
 
 
 def test_bar_color_ramp():
-    # calm blue below 60, amber in the warning band, red when critical
-    assert "#7aa2f7" in app_module._bar(41.0)
-    assert "#ffb454" in app_module._bar(62.0)
-    assert "#ff5c57" in app_module._bar(100.0)
+    # calm blue below 60, amber in the warning band, red when critical.
+    # The full-width bar went with the permanent usage panel; the ramp itself
+    # still drives the mini bars in the `u` overlay.
+    assert "#7aa2f7" in app_module._usage_bar(41.0)
+    assert "#ffb454" in app_module._usage_bar(62.0)
+    assert "#ff5c57" in app_module._usage_bar(100.0)
 
 
 # ---------------------------------------------------------------- live activity
@@ -1378,24 +1300,26 @@ def test_quick_key_launches_claude_in_cwd(tmp_path: Path, monkeypatch: pytest.Mo
 
 
 def test_inline_picker_opens_a_tab_per_enter(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
-    """Enter opens exactly the highlighted directory and leaves the picker up,
+    """Enter opens exactly the highlighted directory and leaves the launcher up,
     so several tabs is several presses rather than a checkbox multi-select."""
     opened = _launch_harness(tmp_path, monkeypatch)
 
     async def run() -> None:
         app = AdashApp(cmd_file=str(tmp_path / "cmd"))
-        async with app.run_test(size=(110, 40)) as pilot:
+        async with app.run_test(size=(120, 40)) as pilot:
             await _wait_for_table(pilot, app)
             assert len(app.dirs) == 2  # cwd + /tmp
-            await pilot.press("down")   # launch -> picker[0] (cwd)
+            await pilot.press("n")
+            await pilot.pause(0.05)
+            assert app.picker_idx == 0  # cwd preselected
             await pilot.press("enter")  # opens cwd only
             await pilot.pause(0.1)
             assert len(opened) == 1
-            assert app.zone == "picker"  # picker stays up for the next one
-            await pilot.press("down")   # -> picker[1] (/tmp)
+            assert app.mode == "launcher"  # stays up for the next one
+            await pilot.press("down")   # -> dirs[1] (/tmp)
             await pilot.press("enter")
             await pilot.pause(0.1)
-            # the footer echoes both directories opened this run
+            # the pane echoes both directories opened this run
             assert app.picker_opened == [os.getcwd(), "/tmp"]
 
     asyncio.run(run())
@@ -1403,24 +1327,22 @@ def test_inline_picker_opens_a_tab_per_enter(tmp_path: Path, monkeypatch: pytest
     stems = sorted(o[1].split("/")[-1] for o in opened)
     assert stems == sorted([f"agentdash-claude-{app_module._dir_slug(os.getcwd())}", "agentdash-claude-tmp"])
 
-
 def test_picker_launches_selected_tool(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     opened = _launch_harness(tmp_path, monkeypatch)
 
     async def run() -> None:
         app = AdashApp(cmd_file=str(tmp_path / "cmd"))
-        async with app.run_test(size=(110, 40)) as pilot:
+        async with app.run_test(size=(120, 40)) as pilot:
             await _wait_for_table(pilot, app)
+            await pilot.press("n")      # open the launcher
             await pilot.press("right")  # chips: claude -> codex
             await pilot.pause(0.05)
-            await pilot.press("down")   # into the picker (cwd preselected)
             await pilot.press("enter")  # launch the selected tool (codex) in cwd
             await pilot.pause(0.1)
 
     asyncio.run(run())
     slug = app_module._dir_slug(os.getcwd())
     assert opened == [["open", f"warp://tab_config/agentdash-codex-{slug}"]]
-
 
 def test_recent_dirs_pins_cwd_first(monkeypatch: pytest.MonkeyPatch):
     app = AdashApp()
@@ -2065,13 +1987,14 @@ def test_other_directory_row_launches_typed_path(tmp_path: Path, monkeypatch: py
 
     async def run() -> None:
         app = AdashApp(cmd_file=str(tmp_path / "cmd"))
-        async with app.run_test(size=(110, 40)) as pilot:
+        async with app.run_test(size=(120, 40)) as pilot:
             await _wait_for_table(pilot, app)
-            # walk down past every dir onto the "open another directory" row
-            for _ in range(len(app.dirs) + 1):
+            await pilot.press("n")
+            # walk down past every dir onto the "type a path" row
+            for _ in range(len(app.dirs)):
                 await pilot.press("down")
             await pilot.pause(0.05)
-            assert app.zone == "picker" and app.picker_idx == len(app.dirs)
+            assert app.mode == "launcher" and app.picker_idx == len(app.dirs)
             await pilot.press("enter")  # opens the path prompt
             await pilot.pause(0.05)
             dirinput = app.query_one("#dirinput", Input)
@@ -2084,7 +2007,6 @@ def test_other_directory_row_launches_typed_path(tmp_path: Path, monkeypatch: py
     asyncio.run(run())
     slug = app_module._dir_slug(str(target))
     assert opened == [["open", f"warp://tab_config/agentdash-claude-{slug}"]]
-
 
 def test_other_directory_rejects_missing_path(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     from textual.widgets import Input

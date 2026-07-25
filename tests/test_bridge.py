@@ -148,7 +148,7 @@ def test_compact_stamp_fits_the_four_cell_column():
 def test_agent_row_surfaces_waiting_in_the_meta_line():
     row = bridge.agent_row(_agent(state="waiting", label=""), "AI Next Evals", theme=DARK)
     assert "waiting on you" in row.meta
-    assert plain(row.marker) == "◐"
+    assert plain(row.marker) == "◆"
 
 
 def test_agent_row_leads_with_the_tool_then_the_project():
