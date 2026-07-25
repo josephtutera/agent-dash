@@ -1,7 +1,11 @@
 """Subscription usage collectors.
 
 - Claude: live usage API (api/oauth/usage) using the OAuth token Claude Code
-  stores in the macOS Keychain. Same endpoint the /usage command uses.
+  stores in the macOS Keychain. Same endpoint the /usage command uses. Those
+  access tokens only last ~8 hours and Claude Code renews one lazily, when it
+  makes a call of its own, so an account you haven't touched today has a dead
+  token on disk. We renew it here from the stored refresh token and write the
+  result back, which keeps both tools on one credential.
 - Codex: rate_limit snapshots embedded in local rollout files; the newest one
   wins. No API call needed, but data is only as fresh as your last Codex turn.
 - OpenCode: no subscription quota (BYOK), so we report 7-day API spend from
@@ -10,10 +14,12 @@
 
 from __future__ import annotations
 
+import getpass
 import hashlib
 import json
 import sqlite3
 import subprocess
+import sys
 import time
 import urllib.error
 import urllib.request
@@ -29,6 +35,21 @@ from collectors import _parse_ts
 USAGE_CACHE_TTL_SECONDS = 120
 RATE_LIMIT_BACKOFF_START = 120.0  # first cooldown after a 429
 RATE_LIMIT_BACKOFF_MAX = 900.0  # doubles per repeat 429, capped at 15 minutes
+# A credential that needs a human can't heal on the next poll, and re-firing a
+# dead token every few minutes is exactly what earns the account a 429. Sit out.
+AUTH_FAILURE_COOLDOWN_SECONDS = 900.0
+
+# Claude Code's own OAuth client and token endpoint, read out of the 2.1.x
+# binary's string table rather than from memory. Access tokens live ~8 hours and
+# are only renewed when Claude Code itself makes a call, so an account you
+# haven't used today has a dead token sitting in the Keychain -- which is why
+# the dashboard has to be able to refresh one on its own.
+CLAUDE_OAUTH_CLIENT_ID = "9d1c250a-e61b-44d9-88ed-5944d1962f5e"
+CLAUDE_OAUTH_TOKEN_URL = "https://platform.claude.com/v1/oauth/token"
+CLAUDE_USER_AGENT = "claude-code/2.0.0"
+# Refresh a little before the stated expiry: a token that dies in the next few
+# minutes is already useless to a poller that only wakes every three.
+TOKEN_REFRESH_SKEW_SECONDS = 300.0
 
 
 @dataclass
@@ -117,20 +138,54 @@ def _keychain_service(profile: ClaudeProfile) -> str:
     return f"Claude Code-credentials-{digest}"
 
 
-def _profile_credentials(profile: ClaudeProfile) -> tuple[str, str] | None:
-    """(access_token, plan) for a profile. Prefer the config dir's own
+@dataclass
+class ClaudeCredentials:
+    """One account's stored OAuth blob, plus where it came from so a refreshed
+    token can be written back to the same place Claude Code will read it."""
+
+    oauth: dict  # the whole claudeAiOauth object, kept intact for write-back
+    keychain_service: str | None = None
+    file_path: Path | None = None
+
+    @property
+    def token(self) -> str:
+        return self.oauth.get("accessToken") or ""
+
+    @property
+    def plan(self) -> str:
+        return _pretty_plan(self.oauth.get("subscriptionType", "") or "")
+
+    @property
+    def refresh_token(self) -> str | None:
+        return self.oauth.get("refreshToken")
+
+    @property
+    def expires_at(self) -> float | None:
+        """Epoch seconds, or None when the entry doesn't record one."""
+        raw = self.oauth.get("expiresAt")
+        return raw / 1000.0 if isinstance(raw, (int, float)) else None
+
+    def expired(self, skew: float = TOKEN_REFRESH_SKEW_SECONDS) -> bool:
+        """True when the access token is past (or nearly past) its life. An
+        entry with no expiry recorded can't be judged, so we assume it works
+        and let a 401 tell us otherwise."""
+        expires = self.expires_at
+        return expires is not None and expires - skew <= time.time()
+
+
+def _profile_credentials(profile: ClaudeProfile) -> ClaudeCredentials | None:
+    """The stored credentials for a profile. Prefer the config dir's own
     .credentials.json (Linux); on macOS fall back to the Keychain entry for
     this account (bare name for the default, hashed suffix otherwise)."""
-    creds = _read_json(profile.config_dir / ".credentials.json")
-    oauth = (creds or {}).get("claudeAiOauth") or {}
-    token = oauth.get("accessToken")
-    if token:
-        return token, _pretty_plan(oauth.get("subscriptionType", ""))
+    path = profile.config_dir / ".credentials.json"
+    oauth = (_read_json(path) or {}).get("claudeAiOauth") or {}
+    if oauth.get("accessToken"):
+        return ClaudeCredentials(oauth=oauth, file_path=path)
     return _keychain_claude_credentials(_keychain_service(profile))
 
 
-def _keychain_claude_credentials(service: str = "Claude Code-credentials") -> tuple[str, str] | None:
-    """Return (access_token, plan) from a Claude Code Keychain entry, or None."""
+def _keychain_claude_credentials(service: str = "Claude Code-credentials") -> ClaudeCredentials | None:
+    """Read a Claude Code Keychain entry, or None when it's missing or locked."""
     try:
         out = subprocess.run(
             ["security", "find-generic-password", "-s", service, "-w"],
@@ -146,10 +201,108 @@ def _keychain_claude_credentials(service: str = "Claude Code-credentials") -> tu
         oauth = json.loads(out.stdout).get("claudeAiOauth", {})
     except ValueError:
         return None
-    token = oauth.get("accessToken")
-    if not token:
+    if not oauth.get("accessToken"):
         return None
-    return token, _pretty_plan(oauth.get("subscriptionType", ""))
+    return ClaudeCredentials(oauth=oauth, keychain_service=service)
+
+
+def _keychain_account() -> str:
+    """The Keychain item's account field. Claude Code stores credentials under
+    the login name, and updating an item requires matching it."""
+    return getpass.getuser()
+
+
+def _security_quote(value: str) -> str:
+    """Quote one argument for `security -i`, whose interactive mode re-parses
+    each line with shell-like rules. The payload is JSON, so it is full of the
+    quotes and backslashes that tokenizer treats as syntax."""
+    return '"' + value.replace("\\", "\\\\").replace('"', '\\"') + '"'
+
+
+def _persist_credentials(creds: ClaudeCredentials) -> bool:
+    """Write the blob back where it came from, so Claude Code and the dashboard
+    keep sharing one credential. This matters most when the server rotates the
+    refresh token: a new one we kept to ourselves would strand Claude Code
+    holding a dead one."""
+    blob = json.dumps({"claudeAiOauth": creds.oauth})
+    if creds.file_path is not None:
+        try:
+            creds.file_path.write_text(blob)
+            creds.file_path.chmod(0o600)
+        except OSError:
+            return False
+        return True
+    if not creds.keychain_service:
+        return False
+    # Fed over stdin rather than argv: a token in a command line is visible to
+    # every process on the machine via `ps` for as long as the call runs.
+    line = " ".join([
+        "add-generic-password -U",
+        "-a", _security_quote(_keychain_account()),
+        "-s", _security_quote(creds.keychain_service),
+        "-w", _security_quote(blob),
+    ])
+    try:
+        out = subprocess.run(["security", "-i"], input=line + "\n",
+                             capture_output=True, text=True, timeout=10)
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    return out.returncode == 0
+
+
+def _post_json(url: str, body: dict, timeout: float = 10) -> dict | None:
+    """POST a JSON body and decode the JSON reply, or None on any failure."""
+    req = urllib.request.Request(
+        url,
+        data=json.dumps(body).encode(),
+        headers={
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+            "User-Agent": CLAUDE_USER_AGENT,
+        },
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            return json.loads(resp.read().decode())
+    except Exception:
+        return None
+
+
+def _refresh_claude_token(creds: ClaudeCredentials) -> ClaudeCredentials | None:
+    """Mint a fresh access token from the stored refresh token and persist the
+    result. None when there's nothing to refresh with or the grant is refused,
+    which means the account genuinely needs `claude auth login`."""
+    if not creds.refresh_token:
+        return None
+    payload = _post_json(CLAUDE_OAUTH_TOKEN_URL, {
+        "grant_type": "refresh_token",
+        "refresh_token": creds.refresh_token,
+        "client_id": CLAUDE_OAUTH_CLIENT_ID,
+    })
+    access = (payload or {}).get("access_token")
+    if not access:
+        return None
+
+    oauth = dict(creds.oauth)
+    oauth["accessToken"] = access
+    # Take the rotated refresh token whenever one comes back; keeping the old
+    # one would leave the next refresh (ours or Claude Code's) holding a dud.
+    if payload.get("refresh_token"):
+        oauth["refreshToken"] = payload["refresh_token"]
+    now = time.time()
+    if payload.get("expires_in"):
+        oauth["expiresAt"] = int((now + float(payload["expires_in"])) * 1000)
+    if payload.get("refresh_token_expires_in"):
+        oauth["refreshTokenExpiresAt"] = int((now + float(payload["refresh_token_expires_in"])) * 1000)
+    if isinstance(payload.get("scope"), str):
+        oauth["scopes"] = payload["scope"].split()
+
+    refreshed = replace(creds, oauth=oauth)
+    if not _persist_credentials(refreshed):
+        # Non-fatal for this read, but the next process start would fall back to
+        # the stale entry, so say so rather than failing silently.
+        print("adash: refreshed a Claude token but could not write it back", file=sys.stderr)
+    return refreshed
 
 
 def _parse_claude_usage(payload: dict) -> list[UsageWindow]:
@@ -196,6 +349,16 @@ class RateLimited(Exception):
         self.retry_after = retry_after
 
 
+class Unauthorized(Exception):
+    """The usage endpoint returned 401: the access token is expired, revoked,
+    or was rotated out from under us. Worth exactly one refresh-and-retry."""
+
+
+class AuthExpired(Exception):
+    """The account can't be read without a human: no credentials, or a refresh
+    the server refused. Carries the message shown on the row."""
+
+
 @dataclass
 class _ProfileCache:
     """Per-account fetch state: the last good reading and any active cooldown."""
@@ -204,6 +367,9 @@ class _ProfileCache:
     fetched_at: float = 0.0  # time.monotonic() of that reading
     cooldown_until: float = 0.0  # don't call the endpoint again before this
     backoff: float = 0.0  # current 429 penalty, doubles per repeat
+    # Why we're sitting out, as a marker template; "{wait}" (when present) is
+    # filled with the time left so a rate limit can count itself down.
+    cooldown_reason: str = ""
 
 
 _claude_cache: dict[str, _ProfileCache] = {}
@@ -228,6 +394,14 @@ def _copy(usage: ToolUsage) -> ToolUsage:
     return replace(usage, windows=list(usage.windows))
 
 
+def _cooldown_marker(entry: _ProfileCache, now: float) -> str:
+    """The stored reason, with any "{wait}" filled in from the time left. A rate
+    limit counts itself down; a dead credential just says what to go do."""
+    if "{wait}" in entry.cooldown_reason:
+        return entry.cooldown_reason.format(wait=_short_delay(entry.cooldown_until - now))
+    return entry.cooldown_reason
+
+
 def _serve_cached(entry: _ProfileCache, marker: str, plan: str = "") -> ToolUsage:
     """Last known bars flagged with why they're old; a bare note if we never
     got a reading at all. Either way it stays inside the usage columns instead
@@ -243,7 +417,7 @@ def _claude_usage_from_token(token: str, plan: str) -> ToolUsage:
         headers={
             "Authorization": f"Bearer {token}",
             "anthropic-beta": "oauth-2025-04-20",
-            "User-Agent": "claude-code/2.0.0",
+            "User-Agent": CLAUDE_USER_AGENT,
             "Accept": "application/json",
         },
     )
@@ -253,17 +427,54 @@ def _claude_usage_from_token(token: str, plan: str) -> ToolUsage:
     except urllib.error.HTTPError as exc:
         if exc.code == 429:
             raise RateLimited(_retry_after_seconds(exc.headers)) from exc
+        if exc.code == 401:
+            raise Unauthorized() from exc
         return ToolUsage(tool="claude", plan=plan, error=str(exc)[:60])
-    except Exception as exc:  # network down, token expired, etc.
+    except Exception as exc:  # network down, DNS, timeout
         return ToolUsage(tool="claude", plan=plan, error=str(exc)[:60])
     return ToolUsage(tool="claude", plan=plan, windows=_parse_claude_usage(payload))
+
+
+SIGNED_OUT = "signed out · run claude auth login"
+
+
+def _refreshed_or_signed_out(creds: ClaudeCredentials) -> ClaudeCredentials:
+    fresh = _refresh_claude_token(creds)
+    if fresh is None:
+        raise AuthExpired(SIGNED_OUT)
+    return fresh
+
+
+def _read_claude_usage(profile: ClaudeProfile) -> ToolUsage:
+    """One live reading for a profile, renewing the OAuth token when it needs
+    it. Raises RateLimited or AuthExpired for the caller to turn into a
+    cooldown; anything else comes back as a ToolUsage with .error set."""
+    creds = _profile_credentials(profile)
+    if creds is None:
+        raise AuthExpired("unlock Keychain or sign in to Claude Code")
+
+    # Claude Code only renews a token when it makes its own call, so an account
+    # left idle has a dead one on disk. Spend the refresh, not a doomed request.
+    if creds.expired():
+        creds = _refreshed_or_signed_out(creds)
+
+    try:
+        return _claude_usage_from_token(creds.token, creds.plan)
+    except Unauthorized:
+        # The stored expiry lied: revoked, or rotated by another tool. One
+        # refresh, one retry, then we accept that a human has to step in.
+        creds = _refreshed_or_signed_out(creds)
+        try:
+            return _claude_usage_from_token(creds.token, creds.plan)
+        except Unauthorized as exc:
+            raise AuthExpired(SIGNED_OUT) from exc
 
 
 def fetch_claude_usage_for(profile: ClaudeProfile, force: bool = False) -> ToolUsage:
     """Usage for one account, served from cache when that's good enough.
 
-    `force` (the TUI's manual refresh) skips the freshness check but never the
-    429 cooldown, so holding down the refresh key can't dig the hole deeper.
+    `force` (the TUI's manual refresh) skips the freshness check but never a
+    cooldown, so holding down the refresh key can't dig the hole deeper.
     """
     entry = _claude_cache.setdefault(str(profile.config_dir), _ProfileCache())
     now = time.monotonic()
@@ -271,25 +482,25 @@ def fetch_claude_usage_for(profile: ClaudeProfile, force: bool = False) -> ToolU
     if not force and entry.usage is not None and now - entry.fetched_at < USAGE_CACHE_TTL_SECONDS:
         return _copy(entry.usage)
     if now < entry.cooldown_until:
-        return _serve_cached(entry, f"rate limited · retry {_short_delay(entry.cooldown_until - now)}")
+        return _serve_cached(entry, _cooldown_marker(entry, now))
 
-    creds = _profile_credentials(profile)
-    if not creds:
-        return ToolUsage(tool="claude", error="unlock Keychain or sign in to Claude Code")
-
-    token, plan = creds
     try:
-        usage = _claude_usage_from_token(token, plan)
+        usage = _read_claude_usage(profile)
     except RateLimited as exc:
         entry.backoff = min(max(entry.backoff * 2, RATE_LIMIT_BACKOFF_START), RATE_LIMIT_BACKOFF_MAX)
         wait = exc.retry_after if exc.retry_after is not None else entry.backoff
+        entry.cooldown_reason = "rate limited · retry {wait}"
         entry.cooldown_until = now + wait
-        return _serve_cached(entry, f"rate limited · retry {_short_delay(wait)}", plan=plan)
+        return _serve_cached(entry, _cooldown_marker(entry, now))
+    except AuthExpired as exc:
+        entry.cooldown_reason = str(exc)
+        entry.cooldown_until = now + AUTH_FAILURE_COOLDOWN_SECONDS
+        return _serve_cached(entry, str(exc))
 
-    if usage.error:  # transient (network, expired token): retry next poll, don't cache
-        return usage
+    if usage.error:  # transient (network, DNS): retry next poll, don't cache
+        return _serve_cached(entry, usage.error, plan=usage.plan)
     entry.usage, entry.fetched_at = usage, now
-    entry.backoff, entry.cooldown_until = 0.0, 0.0
+    entry.backoff, entry.cooldown_until, entry.cooldown_reason = 0.0, 0.0, ""
     return _copy(usage)
 
 

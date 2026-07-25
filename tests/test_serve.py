@@ -317,6 +317,9 @@ def test_daemon_writes_file_only_on_content_change(tmp_path: Path, monkeypatch: 
     monkeypatch.setattr(serve_module, "claude_profiles", lambda: [])
     monkeypatch.setattr(serve_module, "running_agents", lambda: agents)
     monkeypatch.setattr(serve_module, "enrich", lambda a, **kw: a)
+    # the value block reads live session spend, which ticks up while any agent
+    # is running; pin it too or "identical inputs" isn't what the test measures
+    monkeypatch.setattr(serve_module, "_collect_value", lambda: {"today_usd": 1.0, "month_usd": 2.0})
 
     daemon.poll_usage_once()
     daemon.poll_activity_once()
