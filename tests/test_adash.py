@@ -1210,7 +1210,7 @@ def test_codex_activity_working_then_idle(tmp_path: Path):
         {"timestamp": "t", "type": "event_msg", "payload": {"type": "task_complete"}},
     ])
     st2 = codex_activity(tmp_path / "codex" / "sessions")
-    assert st2.state == "idle" and st2.tokens == 40
+    assert st2.state == "done" and st2.tokens == 40  # the turn ended; that is not "idle"
 
 
 def test_codex_activity_none_when_empty(tmp_path: Path):
@@ -2567,7 +2567,7 @@ def test_codex_status_for_file_reports_working_then_idle(tmp_path: Path):
         {"type": "response_item", "payload": {"type": "function_call", "name": "shell"}},
         {"type": "event_msg", "payload": {"type": "task_complete"}},
     ])
-    assert codex_status_for_file(idle).state == "idle"
+    assert codex_status_for_file(idle).state == "done"
 
 
 def test_codex_tab_titler_generates_a_title_and_animates_when_working(codex_root: Path, tmp_path: Path):

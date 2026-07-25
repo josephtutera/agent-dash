@@ -29,7 +29,7 @@ HEX = re.compile(r"^#[0-9A-Fa-f]{6}$")
 ROLES = (
     "ground", "raised", "selected", "rule",
     "text", "text_soft", "text_dim",
-    "accent", "running", "waiting",
+    "accent", "running", "waiting", "done",
 )
 
 
@@ -113,9 +113,45 @@ def test_state_colour_ignores_the_tool(tool: str):
 def test_state_colours_are_distinct_and_correct():
     assert bridge.state_colour("working", DARK) == DARK.running
     assert bridge.state_colour("waiting", DARK) == DARK.waiting
-    assert bridge.state_colour("idle", DARK) == DARK.text_dim
+    assert bridge.state_colour("done", DARK) == DARK.done
+    assert bridge.state_colour("idle", DARK) == DARK.text_soft
     # an unresolved state reads as quiet, not as an error
     assert bridge.state_colour("unknown", DARK) == DARK.text_dim
+
+
+def test_the_five_states_are_all_visually_distinct():
+    """Running, waiting for approval, finished, idle and unresolved have to be
+    tellable apart at a glance or the colour system is decorative."""
+    seen = {}
+    for state in ("working", "waiting", "done", "idle", "unknown"):
+        colour = bridge.state_colour(state, DARK)
+        glyph = plain(bridge.state_marker(state, DARK))
+        assert (colour, glyph) not in seen, f"{state} looks identical to {seen.get((colour, glyph))}"
+        seen[(colour, glyph)] = state
+
+
+def test_a_working_agent_animates_and_nothing_else_does():
+    """Motion is the one thing a static dot cannot say. It is reserved for
+    work actually in progress."""
+    frames = {plain(bridge.state_marker("working", DARK, tick)) for tick in range(10)}
+    assert len(frames) > 1
+    for state in ("waiting", "done", "idle", "unknown"):
+        still = {plain(bridge.state_marker(state, DARK, tick)) for tick in range(10)}
+        assert len(still) == 1
+
+
+def test_every_spinner_is_a_non_empty_string_of_frames():
+    assert bridge.DEFAULT_SPINNER in bridge.SPINNERS
+    for name, frames in bridge.SPINNERS.items():
+        assert len(frames) >= 2, f"{name} does not animate"
+        assert all(ch.strip() for ch in frames), f"{name} has a blank frame"
+
+
+def test_spinner_frames_cycle_and_never_index_out_of_range():
+    frames = bridge.SPINNERS["dots"]
+    assert bridge.spinner_frame(0) == frames[0]
+    assert bridge.spinner_frame(len(frames)) == frames[0]  # wraps
+    assert bridge.spinner_frame(10_000, "arc")  # any tick is safe
 
 
 def test_waiting_is_the_only_loud_state():
@@ -147,8 +183,13 @@ def test_compact_stamp_fits_the_four_cell_column():
 
 def test_agent_row_surfaces_waiting_in_the_meta_line():
     row = bridge.agent_row(_agent(state="waiting", label=""), "AI Next Evals", theme=DARK)
-    assert "waiting on you" in row.meta
+    assert "waiting for your approval" in row.meta
     assert plain(row.marker) == "◆"
+
+
+def test_a_finished_agent_says_so_in_the_meta_line():
+    row = bridge.agent_row(_agent(state="done", label=""), "Evals", theme=DARK)
+    assert "finished its turn" in row.meta
 
 
 def test_agent_row_leads_with_the_tool_then_the_project():
@@ -193,9 +234,21 @@ def test_detail_running_names_the_state_and_the_tab():
     # the eyebrow fakes letter-spacing by padding the characters, so compare
     # against the de-spaced text rather than the literal line
     text = plain(bridge.detail_running(_agent(state="waiting"), _session(), DARK))
-    squeezed = text.replace(" ", "")
-    assert "WAITINGONYOU" in squeezed
-    assert "TTYS003" in squeezed.upper()
+    assert "waiting for you" in text
+    assert "ttys003" in text
+
+
+def test_labels_are_not_shouted_or_letter_spaced():
+    """Faked tracking reads as shouting in a terminal, where every gap is a
+    whole cell. Section labels stay lowercase and unspaced."""
+    for text in (bridge.label("running now", DARK),
+                 bridge.label("what you asked for", DARK, strong=True),
+                 plain(bridge.detail_session(_session(), DARK))):
+        rendered = plain(text) if text.startswith("[") else text
+        assert "R U N N I N G" not in rendered
+        assert "W H A T" not in rendered
+        assert "E N D E D" not in rendered
+    assert plain(bridge.label("running now", DARK)) == "running now"
 
 
 def test_detail_session_shows_the_literal_resume_command():

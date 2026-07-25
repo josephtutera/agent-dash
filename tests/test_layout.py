@@ -200,6 +200,43 @@ def test_the_keymap_lists_every_binding_that_is_hidden_from_the_footer(harness):
     _run(lambda: asyncio.sleep(0))
 
 
+# ---------------------------------------------------------------- scrolling
+
+def test_arrowing_down_does_not_scroll_until_the_cursor_leaves_the_page(harness, monkeypatch):
+    """The list should sit still while the cursor walks down it. It used to
+    scroll on every press, so the page slid under a cursor pinned near the top.
+    """
+    many = [Session("claude", f"s{i}", f"Session {i}", "/tmp/x",
+                    NOW - timedelta(minutes=i), n_messages=i)
+            for i in range(40)]
+    monkeypatch.setattr(app_module, "collect_all", lambda limit=300: many)
+
+    async def run():
+        app = AdashApp()
+        async with app.run_test(size=(120, 24)) as pilot:
+            await _ready(pilot, app)
+            pane = app.query_one("#list")
+            assert pane.scroll_offset.y == 0
+
+            await pilot.press("down")
+            await pilot.press("down")
+            await pilot.pause(0.1)
+            assert pane.scroll_offset.y == 0, "the page moved while the cursor was still on it"
+
+            for _ in range(30):  # now walk past the bottom of the visible page
+                await pilot.press("down")
+            await pilot.pause(0.15)
+            assert pane.scroll_offset.y > 0, "the page never followed the cursor off the bottom"
+
+            for _ in range(40):  # and back up to the very top
+                await pilot.press("up")
+            await pilot.pause(0.15)
+            assert app.cursor == 0
+            assert pane.scroll_offset.y == 0
+
+    _run(run)
+
+
 # ----------------------------------------------------------------- narrow mode
 
 def test_a_narrow_terminal_drops_the_detail_pane_instead_of_complaining(harness):
@@ -230,29 +267,73 @@ def test_a_wide_terminal_keeps_both_panes(harness):
 
 # --------------------------------------------------------------------- theming
 
-def test_the_theme_toggle_is_remembered_across_launches(harness):
+def test_the_theme_cycles_auto_light_dark_and_is_remembered(harness):
     async def run():
-        first = AdashApp(theme_name="dark")
+        first = AdashApp(theme_name="auto")
         async with first.run_test(size=(120, 32)) as pilot:
             await _ready(pilot, first)
             await pilot.press("T")
             await pilot.pause(0.1)
             assert first.theme_name == "light"
+            await pilot.press("T")
+            await pilot.pause(0.1)
+            assert first.theme_name == "dark"
+            await pilot.press("T")
+            await pilot.pause(0.1)
+            assert first.theme_name == "auto"  # back to following the system
+            await pilot.press("T")
+            await pilot.pause(0.1)
         assert json.loads((harness / "config.json").read_text())["theme"] == "light"
-        # a fresh launch with no explicit theme picks the saved one back up
         assert app_module._load_theme_pref() == "light"
 
     _run(run)
 
 
-def test_an_unreadable_config_falls_back_to_dark_without_complaining(harness):
+def test_auto_resolves_to_whatever_the_system_says(harness, monkeypatch):
+    monkeypatch.setattr(app_module, "system_theme", lambda: "light")
+
+    async def run():
+        app = AdashApp(theme_name="auto")
+        async with app.run_test(size=(120, 32)) as pilot:
+            await _ready(pilot, app)
+            assert app.resolved_theme == "light"
+            assert app.theme_obj is bridge.LIGHT
+            # an explicit choice stops following it
+            app.theme_name = "dark"
+            assert app.resolved_theme == "dark"
+
+    _run(run)
+
+
+def test_system_theme_reads_dark_only_when_defaults_says_so(monkeypatch):
+    """`defaults read -g AppleInterfaceStyle` exits non-zero in light mode
+    because the key is absent, so a failed read means light, not an error."""
+    import subprocess as sp
+
+    class Result:
+        def __init__(self, code, out):
+            self.returncode, self.stdout = code, out
+
+    monkeypatch.setattr(app_module.subprocess, "run", lambda *a, **k: Result(0, "Dark\n"))
+    assert app_module.system_theme() == "dark"
+    monkeypatch.setattr(app_module.subprocess, "run", lambda *a, **k: Result(1, ""))
+    assert app_module.system_theme() == "light"
+
+    def boom(*a, **k):
+        raise OSError("no defaults here")
+
+    monkeypatch.setattr(app_module.subprocess, "run", boom)
+    assert app_module.system_theme() == bridge.DEFAULT_THEME
+
+
+def test_an_unreadable_config_falls_back_to_following_the_system(harness):
     (harness / "config.json").write_text("{ this is not json")
-    assert app_module._load_theme_pref() == bridge.DEFAULT_THEME
+    assert app_module._load_theme_pref() == "auto"
 
 
 def test_a_bogus_theme_name_in_the_config_is_ignored(harness):
     (harness / "config.json").write_text(json.dumps({"theme": "chartreuse"}))
-    assert app_module._load_theme_pref() == bridge.DEFAULT_THEME
+    assert app_module._load_theme_pref() == "auto"
 
 
 def test_both_themes_resolve_every_css_variable_the_stylesheet_uses(harness):

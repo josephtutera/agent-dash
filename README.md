@@ -23,8 +23,16 @@ launcher, in one list with one cursor.
   pick claude, codex, opencode, gemini or a plain shell, pick a directory from
   your recent projects (or type one), and Enter opens a Warp tab. It stays
   open, so several tabs is several presses.
-- **Light and dark.** `T` switches and remembers. `--theme light` picks one at
-  launch.
+- **The conversation, in the pane.** The detail pane shows the session's actual
+  turns, oldest at the top and newest at the bottom, the way you'd have watched
+  it happen in the terminal. Read from a bounded tail and cached on mtime, so a
+  hundred-megabyte rollout doesn't stall the arrow keys.
+- **Five live states, told apart by shape and colour.** A working agent
+  animates a braille spinner; waiting for your approval is amber; a finished
+  turn is cyan; idle and unresolved are grey. Nothing else on screen is
+  coloured.
+- **Light and dark, following macOS.** `T` cycles auto → light → dark and
+  remembers; `--theme` picks one at launch.
 - **Four keys on screen.** Everything else is behind `?`. Under 100 columns the
   detail pane steps aside and the list takes the full width.
 
@@ -59,7 +67,7 @@ pip install -e '.[dev]'
 
 ```sh
 adash                # launch the dashboard
-adash --theme light  # start in light mode (T toggles and remembers)
+adash --theme light  # override the system theme (T cycles and remembers)
 adash --dump         # print sessions as text, no TUI
 adash --usage        # print subscription usage as text, no TUI
 adash --limit 500    # max sessions to scan per tool (default 300)
@@ -92,7 +100,7 @@ adash() {
 | `tab` | switch the active Claude plan (multi-account, in the launcher) |
 | `y` | copy the selected session's resume command |
 | `u` | subscription usage |
-| `T` | light / dark |
+| `T` | theme: auto (follows macOS) / light / dark |
 | `C` / `U` | clear history / undo |
 | `r` / `q` | refresh / quit |
 

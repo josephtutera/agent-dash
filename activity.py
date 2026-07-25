@@ -39,7 +39,7 @@ _CODEX_DONE = {
 
 @dataclass
 class LiveStatus:
-    state: str = "unknown"  # "working" | "idle" | "waiting" | "unknown"
+    state: str = "unknown"  # "working" | "waiting" | "done" | "idle" | "unknown"
     label: str = ""  # human action, e.g. "running command"
     tokens: int = 0  # live token count for the session (0 if unknown)
     session_id: str = ""  # transcript this process is writing ("" if unknown)
@@ -134,6 +134,12 @@ def codex_status_for_file(path: str | Path) -> LiveStatus:
             tokens = usage["total_tokens"]
     if last_activity in _CODEX_WORKING:
         return LiveStatus(state="working", label=_CODEX_WORKING[last_activity], tokens=tokens)
+    if last_activity in _CODEX_DONE:
+        # the rollout ends on task_complete / agent_message / patch_apply_end,
+        # which means the agent answered and is sitting at the prompt with
+        # something for you to read. That is a different thing from an idle
+        # session that has done nothing, and it used to be flattened into it.
+        return LiveStatus(state="done", label="finished its turn", tokens=tokens)
     return LiveStatus(state="idle" if last_activity else "unknown", tokens=tokens)
 
 

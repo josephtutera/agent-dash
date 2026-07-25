@@ -25,6 +25,7 @@ from textual.screen import ModalScreen
 from textual.widgets import Input, Static
 
 import bridge
+import transcript
 from activity import enrich
 from agents import RunningAgent, running_agents
 from collectors import collect_all
@@ -81,15 +82,35 @@ NARROW_COLUMNS = 100
 CONFIG_PATH = Path.home() / ".config" / "agent-dash" / "config.json"
 
 
+THEME_PREFS = ("auto", "light", "dark")  # what T cycles through
+
+
+def system_theme() -> str:
+    """Whether macOS is currently in dark mode.
+
+    `defaults read -g AppleInterfaceStyle` prints "Dark" in dark mode and exits
+    non-zero in light mode, because the key is simply absent there. That quirk
+    is the whole detection: a failed read means light, not an error.
+    """
+    try:
+        result = subprocess.run(
+            ["defaults", "read", "-g", "AppleInterfaceStyle"],
+            capture_output=True, text=True, timeout=1.0,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return bridge.DEFAULT_THEME  # not macOS, or defaults is unavailable
+    return "dark" if result.returncode == 0 and "dark" in result.stdout.lower() else "light"
+
+
 def _load_theme_pref() -> str:
     """A theme toggle you have to re-apply on every launch is a party trick, so
     the choice is remembered. A missing or unreadable config is not worth a
-    warning: fall back to dark and carry on."""
+    warning: follow the system and carry on."""
     try:
         name = json.loads(CONFIG_PATH.read_text()).get("theme")
     except Exception:
-        return bridge.DEFAULT_THEME
-    return name if name in bridge.THEMES else bridge.DEFAULT_THEME
+        return "auto"
+    return name if name in THEME_PREFS else "auto"
 
 
 def _save_theme_pref(name: str) -> None:
@@ -476,7 +497,7 @@ class AdashApp(App):
         ]),
         ("the dashboard", [
             ("u", "subscription usage"),
-            ("T", "switch light / dark"),
+            ("T", "theme: auto / light / dark"),
             ("r", "refresh now"),
             ("C / U", "clear history / undo"),
             ("q", "quit"),
@@ -487,6 +508,7 @@ class AdashApp(App):
         # set before super(): App.__init__ builds the stylesheet, which calls
         # get_css_variables, which needs to know which palette we are on
         self.theme_name = theme_name or _load_theme_pref()
+        self._system_theme = system_theme()
         super().__init__()
         self.cmd_file = cmd_file
         self.limit = limit
@@ -554,14 +576,41 @@ class AdashApp(App):
         return variables
 
     @property
+    def resolved_theme(self) -> str:
+        """The palette actually in use. `auto` follows the system appearance."""
+        if self.theme_name == "auto":
+            return self._system_theme
+        return self.theme_name
+
+    @property
     def theme_obj(self) -> bridge.Theme:
-        return bridge.THEMES.get(self.theme_name, bridge.THEMES[bridge.DEFAULT_THEME])
+        return bridge.THEMES.get(self.resolved_theme, bridge.THEMES[bridge.DEFAULT_THEME])
+
+    def _follow_system_theme(self) -> None:
+        """Re-read the system appearance and restyle if it flipped. Runs on the
+        history poll rather than a timer of its own: switching your Mac between
+        light and dark is a once-a-day event, not something worth a subprocess
+        every second."""
+        if self.theme_name != "auto":
+            return
+        current = system_theme()
+        if current != self._system_theme:
+            self._system_theme = current
+            self.refresh_css()
+            self._render_all()
 
     def on_mount(self) -> None:
         for widget_id in ("#search", "#dirinput"):
             field = self.query_one(widget_id, Input)
             field.display = False
             field.can_focus = False  # only focusable while it is open
+        # Textual makes a scrollable container focusable, and a focused
+        # container handles the arrow keys itself before they ever reach
+        # on_key — which scrolled the page out from under the cursor as soon
+        # as the list was long enough to have a scrollbar. Both panes are
+        # driven entirely from on_key, so neither may take focus.
+        for pane_id in ("#list", "#detailscroll"):
+            self.query_one(pane_id).can_focus = False
         self.set_focus(None)  # keys flow to on_key / bindings, not a focused widget
         self.dirs = self._recent_dirs()
         self._apply_width()
@@ -648,7 +697,7 @@ class AdashApp(App):
             selected = index == self.cursor and self.mode == "browse"
             if entry.kind == "agent":
                 row = bridge.agent_row(entry.agent, self._title_for(entry.agent),
-                                       selected=selected, theme=theme)
+                                       selected=selected, theme=theme, tick=self._spin)
             else:
                 row = bridge.session_row(entry.session, selected=selected)
             rendered = bridge.render_row(row, theme, width)
@@ -701,18 +750,48 @@ class AdashApp(App):
             self._update("#detailbody", bridge.detail_empty(theme))
             self._update("#action", bridge.action_bar(theme, "n", "start an agent somewhere"))
             return
+        width = self._detail_width()
         if entry.kind == "agent":
             agent = entry.agent
             session = self._session_for(agent)
-            body = bridge.detail_running(agent, session, theme, self._usage_note(agent.tool))
+            body = bridge.detail_running(agent, session, theme, self._usage_note(agent.tool),
+                                         turns=self._turns(session), width=width)
             action = bridge.action_bar(theme, "\u23ce", "jump to this tab in Warp", agent.tty)
         else:
             session = entry.session
-            body = bridge.detail_session(session, theme, self._usage_note(session.tool))
+            body = bridge.detail_session(session, theme, self._usage_note(session.tool),
+                                         turns=self._turns(session), width=width)
             action = bridge.action_bar(theme, "\u23ce", "resume in a new Warp tab",
                                        Path(resume_directory(session)).name)
         self._update("#detailbody", body)
         self._update("#action", action)
+        self._scroll_detail_to_latest()
+
+    def _detail_width(self) -> int:
+        try:
+            return max(30, self.query_one("#detailscroll").size.width - 2)
+        except (NoMatches, AttributeError):
+            return 76
+
+    def _turns(self, session: Session | None):
+        """The conversation behind the selection, or nothing if the transcript
+        is gone. Never let a malformed log take the pane down with it."""
+        if session is None:
+            return ()
+        try:
+            return transcript.read_turns(session)
+        except Exception:
+            return ()
+
+    def _scroll_detail_to_latest(self) -> None:
+        """Park the pane on the newest turn. The conversation reads oldest to
+        newest like scrollback, so the bottom is the interesting end — the same
+        place the terminal itself would have left you."""
+        try:
+            pane = self.query_one("#detailscroll", VerticalScroll)
+        except NoMatches:
+            return
+        pane.scroll_end(animate=False)
 
     def _render_footer(self) -> None:
         theme = self.theme_obj
@@ -814,15 +893,30 @@ class AdashApp(App):
         self._scroll_to_cursor()
 
     def _scroll_to_cursor(self) -> None:
-        """Rows are a fixed three lines, so the cursor's line is arithmetic."""
+        """Keep the cursor in view, and otherwise leave the scroll alone.
+
+        Arrowing down used to scroll on every press, so the list slid under a
+        cursor that was pinned near the top of the pane. The rule people expect
+        from a list is the opposite: the cursor moves through a still page, and
+        the page only moves once the cursor would leave it.
+        """
         try:
             pane = self.query_one("#list", VerticalScroll)
         except NoMatches:
             return
-        for line, index in self._line_index.items():
-            if index == self.cursor:
-                pane.scroll_to(y=max(0, line - 4), animate=False)
-                return
+        lines = sorted(line for line, index in self._line_index.items() if index == self.cursor)
+        if not lines:
+            return
+        top, bottom = lines[0], lines[-1]
+        window_top = int(pane.scroll_offset.y)
+        window_height = max(1, pane.size.height)
+        window_bottom = window_top + window_height - 1
+        if top < window_top:
+            # come to rest two lines high so the section heading above the row
+            # stays on screen; at the very top this lands cleanly on zero
+            pane.scroll_to(y=max(0, top - 2), animate=False)
+        elif bottom > window_bottom:
+            pane.scroll_to(y=bottom - window_height + 1, animate=False)
 
     # ------------------------------------------------------------- keyboard
 
@@ -1053,6 +1147,7 @@ class AdashApp(App):
         self.dirs = self._recent_dirs()
         self.picker_idx = min(self.picker_idx, len(self.dirs))  # len(dirs) == the "type a path" row
         self._loaded = True
+        self._follow_system_theme()
         self._rebuild()
         self.load_running()
         self._schedule_titles(eligible)
@@ -1257,11 +1352,17 @@ class AdashApp(App):
         self.push_screen(_OverlayScreen(body, "Subscriptions"))
 
     def action_toggle_theme(self) -> None:
-        self.theme_name = "light" if self.theme_name == "dark" else "dark"
-        _save_theme_pref(self.theme_name)
+        """auto -> light -> dark -> auto. `auto` is first because following the
+        system is the setting you want unless you have a reason not to."""
+        nxt = THEME_PREFS[(THEME_PREFS.index(self.theme_name) + 1) % len(THEME_PREFS)]
+        self.theme_name = nxt
+        if nxt == "auto":
+            self._system_theme = system_theme()
+        _save_theme_pref(nxt)
         self.refresh_css()
         self._render_all()
-        self.notify(f"{self.theme_name} mode", timeout=2)
+        told = f"following the system ({self.resolved_theme})" if nxt == "auto" else f"{nxt} mode"
+        self.notify(told, timeout=2)
 
     def action_copy_resume(self) -> None:
         """y. Copies the exact command the detail pane is showing, so the pane

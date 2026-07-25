@@ -38,7 +38,7 @@ class RunningAgent:
     title: str = ""  # resolved later from the session list
     session_id: str = ""  # exact transcript id when the tool exposes one
     # live activity, filled in by activity.enrich (defaults = not-yet-known)
-    state: str = "unknown"  # "working" | "idle" | "waiting" | "unknown"
+    state: str = "unknown"  # "working" | "waiting" | "done" | "idle" | "unknown"
     label: str = ""  # current action, e.g. "running command"
     tokens: int = 0  # live token count for this session (0 if unknown)
 

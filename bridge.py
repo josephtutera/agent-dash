@@ -50,6 +50,7 @@ class Theme:
     accent: str  # selection and the primary action. never a state
     running: str  # an agent working away happily
     waiting: str  # an agent that wants you. the one colour that should pull
+    done: str  # finished its turn and has something for you to read
 
     def on_accent(self) -> str:
         """Text colour for the filled action bar. The accent is dark in light
@@ -69,6 +70,7 @@ LIGHT = Theme(
     accent="#1B4FD8",
     running="#136B47",
     waiting="#A85C04",
+    done="#0E6F8E",
 )
 
 DARK = Theme(
@@ -85,6 +87,7 @@ DARK = Theme(
     accent="#4C7DF0",
     running="#4FA37F",
     waiting="#D9A040",
+    done="#54A8C7",
 )
 
 THEMES = {"light": LIGHT, "dark": DARK}
@@ -106,6 +109,7 @@ def css_variables(theme: Theme) -> dict[str, str]:
         "ad-accent": theme.accent,
         "ad-running": theme.running,
         "ad-waiting": theme.waiting,
+        "ad-done": theme.done,
     }
 
 
@@ -123,11 +127,16 @@ def truncate(text: str, width: int) -> str:
 
 
 def label(text: str, theme: Theme, *, strong: bool = False) -> str:
-    """A section label: uppercase, letter-spaced, and quiet. Terminals have no
-    tracking, so the spaced-out caps are faked with the characters themselves."""
-    spaced = " ".join(text.upper())
+    """A section label. Plain lowercase, quiet.
+
+    This used to fake letter-spacing by padding capitals apart, the way the
+    Paper mock renders tracked small caps. A proportional canvas can carry
+    that; a terminal cannot, because every gap is a whole cell wide, so it came
+    out shouting and hard to read. Weight and colour do the work instead.
+    """
     colour = theme.text if strong else theme.text_dim
-    return f"[{colour}]{'[bold]' if strong else ''}{spaced}{'[/bold]' if strong else ''}[/]"
+    body = f"[bold]{text.lower()}[/bold]" if strong else text.lower()
+    return f"[{colour}]{body}[/]"
 
 
 def rule_line(theme: Theme, width: int) -> str:
@@ -136,16 +145,34 @@ def rule_line(theme: Theme, width: int) -> str:
 
 # --------------------------------------------------------------- state markers
 
-#: How each live agent state reads. `unknown` is deliberately styled like idle
-#: rather than like an error: not having resolved an agent's state yet is the
-#: normal case for the first couple of seconds and shouldn't flash at you.
-#: Two distinct shapes rather than two colours of the same dot, so the states
-#: stay legible without relying on colour vision.
+#: Terminal spinners, the character-based equivalent of a spinner library's
+#: animated set. All are pure text on the terminal's own grid, so they cost a
+#: string index per frame and never fight the font.
+SPINNERS = {
+    "dots": "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏",
+    "line": "|/-\\",
+    "arc": "◜◠◝◞◡◟",
+    "bounce": "⠁⠂⠄⠂",
+    "pulse": "∙∘○∘",
+    "grow": "▁▃▄▅▆▇▆▅▄▃",
+    "toggle": "⊶⊷",
+    "arrow": "←↖↑↗→↘↓↙",
+    "circle": "◐◓◑◒",
+    "square": "◰◳◲◱",
+}
+DEFAULT_SPINNER = "dots"
+
+#: Four shapes, not four shades of one dot, so the states stay legible without
+#: relying on colour vision. `working` is the odd one out: it animates, and the
+#: glyph here is only the still frame used when the spinner is not ticking.
+#: `unknown` reads like idle on purpose — not having resolved an agent's state
+#: yet is the normal case for the first second and shouldn't flash at you.
 _STATE_GLYPH = {
     "working": "●",
     "waiting": "◆",
+    "done": "●",
     "idle": "○",
-    "unknown": "○",
+    "unknown": "·",
 }
 
 
@@ -154,22 +181,42 @@ def state_colour(state: str, theme: Theme) -> str:
         return theme.running
     if state == "waiting":
         return theme.waiting
+    if state == "done":
+        return theme.done
+    if state == "idle":
+        return theme.text_soft
     return theme.text_dim
 
 
-def state_marker(state: str, theme: Theme) -> str:
-    """The coloured dot at the head of a running row."""
-    glyph = _STATE_GLYPH.get(state, "○")
+def spinner_frame(tick: int, name: str = DEFAULT_SPINNER) -> str:
+    frames = SPINNERS.get(name, SPINNERS[DEFAULT_SPINNER])
+    return frames[tick % len(frames)]
+
+
+def state_marker(state: str, theme: Theme, tick: int | None = None,
+                 spinner: str = DEFAULT_SPINNER) -> str:
+    """The marker at the head of a running row.
+
+    A working agent animates. That motion is the cheapest possible way to say
+    "this is alive right now" and it is the one thing a static dot cannot
+    convey — you would otherwise have to read the elapsed column to tell a
+    busy agent from a stalled one.
+    """
+    if state == "working" and tick is not None:
+        glyph = spinner_frame(tick, spinner)
+    else:
+        glyph = _STATE_GLYPH.get(state, "·")
     return f"[{state_colour(state, theme)}]{glyph}[/]"
 
 
 def state_words(state: str) -> str:
     """Plain-English state for the eyebrow above the detail title."""
     return {
-        "working": "WORKING",
-        "waiting": "WAITING ON YOU",
-        "idle": "IDLE",
-    }.get(state, "RUNNING")
+        "working": "working",
+        "waiting": "waiting for you",
+        "done": "finished its turn",
+        "idle": "idle",
+    }.get(state, "running")
 
 
 # ------------------------------------------------------------------- list rows
@@ -195,16 +242,19 @@ def compact_stamp(text: str) -> str:
     return text.removesuffix(" ago")
 
 
-def agent_row(agent, title: str, *, selected: bool = False, theme: Theme = DARK) -> Row:
+def agent_row(agent, title: str, *, selected: bool = False, theme: Theme = DARK,
+              tick: int | None = None, spinner: str = DEFAULT_SPINNER) -> Row:
     """A live agent. The meta line leads with the tool and ends with what it is
     doing right now, which is the only place the label earns its space."""
     bits = [agent.tool, _short_project(agent.cwd)]
     if agent.state == "waiting":
-        bits.append(agent.label or "waiting on you")
+        bits.append(agent.label or "waiting for your approval")
+    elif agent.state == "done":
+        bits.append(agent.label or "finished its turn")
     elif agent.label:
         bits.append(agent.label)
     return Row(
-        marker=state_marker(agent.state, theme),
+        marker=state_marker(agent.state, theme, tick, spinner),
         title=truncate(title or agent.title or _short_project(agent.cwd), LIST_TITLE_W),
         meta=" · ".join(b for b in bits if b),
         stamp=compact_stamp(agent.elapsed),
@@ -260,8 +310,8 @@ def _short_project(path: str) -> str:
 
 def _eyebrow(theme: Theme, colour: str, state: str, facts: str) -> str:
     return (
-        f"[{colour}]●[/] [{colour}][bold]{' '.join(state)}[/bold][/]"
-        f"  [{theme.text_dim}]{' '.join(facts.upper())}[/]"
+        f"[{colour}]●[/] [{colour}][bold]{state}[/bold][/]"
+        f"  [{theme.text_dim}]{facts}[/]"
     )
 
 
@@ -294,7 +344,8 @@ def hint_line(theme: Theme, pairs: list[tuple[str, str]]) -> str:
     )
 
 
-def detail_running(agent, session: Session | None, theme: Theme, usage_note: str = "") -> str:
+def detail_running(agent, session: Session | None, theme: Theme, usage_note: str = "",
+                   turns=(), width: int = 76) -> str:
     """S1 · a live agent is selected. The pane answers "what is it doing" and
     Enter jumps to its tab."""
     colour = state_colour(agent.state, theme)
@@ -319,18 +370,21 @@ def detail_running(agent, session: Session | None, theme: Theme, usage_note: str
         lines.append(_stat(theme, f"{agent.tool} window", usage_note))
     if agent.label:
         lines += ["", label("doing now", theme), f"[{colour}]{escape(agent.label)}[/]"]
-    if session and session.first_prompt:
+    if turns:
+        lines += ["", transcript_block(turns, theme, width, agent.tool)]
+    elif session and session.first_prompt:
         lines += ["", label("what you asked for", theme),
                   f"[{theme.text_soft}]{escape(session.first_prompt)}[/]"]
     return "\n".join(lines)
 
 
-def detail_session(session: Session, theme: Theme, usage_note: str = "") -> str:
+def detail_session(session: Session, theme: Theme, usage_note: str = "",
+                   turns=(), width: int = 76) -> str:
     """S2 · a finished session is selected. The pane shows the literal resume
     command, because the thing you actually want from history is a way back in."""
     facts = f"{session.tool} · last active {rel_time(session.last_active)}"
     lines = [
-        _eyebrow(theme, theme.text_dim, "ENDED", facts),
+        _eyebrow(theme, theme.text_dim, "ended", facts),
         "",
         _heading(theme, session.title or "(untitled session)"),
         f"[{theme.text_soft}]{escape(_tilde(session.project_dir))}[/]",
@@ -344,7 +398,9 @@ def detail_session(session: Session, theme: Theme, usage_note: str = "") -> str:
     ]
     if usage_note:
         lines.append(_stat(theme, f"{session.tool} window", usage_note))
-    if session.first_prompt:
+    if turns:
+        lines += ["", transcript_block(turns, theme, width, session.tool)]
+    elif session.first_prompt:
         lines += ["", label("what you asked for", theme),
                   f"[{theme.text_soft}]{escape(session.first_prompt)}[/]"]
     lines += ["", label("resume command", theme),
@@ -475,6 +531,44 @@ def match_block(theme: Theme, snippets: list[str], where: str) -> str:
         accent = theme.accent if i == 0 else theme.rule
         lines.append(f"[{accent}]▎[/] [{theme.text_soft}]{escape(snippet)}[/]")
     return "\n".join(lines)
+
+
+def transcript_block(turns, theme: Theme, width: int = 76, agent_name: str = "agent") -> str:
+    """The conversation, rendered the way you would have watched it happen.
+
+    Oldest at the top, newest at the bottom, speaker on its own line and the
+    body indented under it. That indent is doing the real work: it is what a
+    terminal transcript looks like, and it means you can skim the left edge for
+    who was talking without reading a word.
+    """
+    if not turns:
+        return ""
+    lines = [label("conversation", theme)]
+    for turn in turns:
+        if turn.role == "user":
+            who, colour, body = "you", theme.accent, theme.text
+        else:
+            who, colour, body = agent_name, theme.text_soft, theme.text_soft
+        lines.append(f"[{colour}][bold]{who}[/bold][/]")
+        for wrapped in _wrap(turn.text, max(20, width - 2)):
+            lines.append(f"  [{body}]{escape(wrapped)}[/]")
+        lines.append("")
+    return "\n".join(lines).rstrip()
+
+
+def _wrap(text: str, width: int) -> list[str]:
+    """Greedy word wrap. Rich would wrap this for us, but then the indent would
+    only apply to the first line and the speaker columns would collapse."""
+    words, lines, current = text.split(), [], ""
+    for word in words:
+        if current and len(current) + 1 + len(word) > width:
+            lines.append(current)
+            current = word
+        else:
+            current = f"{current} {word}".strip()
+    if current:
+        lines.append(current)
+    return lines or [""]
 
 
 def _tilde(path: str) -> str:
